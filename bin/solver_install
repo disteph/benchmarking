@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# directory of the script
+dir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+
+# get the option
+option=$1
+
+# yices2 directory
+yices2_dir="$dir/yices2"
+
+export LD_LIBRARY_PATH=$dir/install/lib:/usr/local/lib
+export LDFLAGS="-L/space-1/yices/sgl_exp/lib/lib"
+
+# descend into correct directory to get git tagging
+case $option in
+    qs)
+        cd "$dir/yicesQS"
+        ;;
+    *)
+	cd "$yices2_dir"
+	;;
+esac
+
+# Constructing a tag for version found in that directory
+
+status=$( git status -s | grep "M " )
+
+if [ -z "$status" ]
+then
+    modified=""
+else
+    modified="_modified_$( date --iso-8601=minutes | sed s/T/_/g)"
+fi
+
+branch=$( git status -bs | head -1 | sed 's/##\ \(.*\)\.\.\.\(.*\)$/\1/' )
+base=$( git log -n 1 --format=format:"%aI_%h" | sed s/"T"/_/g )
+
+if [ -z "$( echo $branch | grep "##" )" ]
+then
+    tag=$base$modified"_"$branch
+else
+    tag=$base$modified"_nobranch"
+fi
+
+# Initialising parts of filename
+opt=""
+prefix=""
+suffix=""
+
+case $option in 
+    debug)
+        MODE=debug make
+        suffix="-debug"
+        bin_dir="x86_64-pc-linux-gnu-debug/bin"
+	bin="$yices2_dir/build/$bin_dir/yices_smt2"
+        ;;
+    debug-check)
+        MODE=debug make
+        suffix="-debug-check"
+        bin_dir="x86_64-pc-linux-gnu-debug/bin"
+        bin="$yices2_dir/build/$bin_dir/yices_smt2"
+	opt=" --trace mcsat::bv::conflict::check --trace mcsat::propagation::check --trace mcsat::bv::rewrite::check"
+        ;;
+    static)
+        make static-bin
+        suffix="-static"
+        bin_dir="x86_64-pc-linux-gnu-release/static_bin"
+        bin="$yices2_dir/build/$bin_dir/yices_smt2"
+	;;
+    api)
+        make
+	make install
+        bin=$(mktemp) || exit 1
+	echo "$tag" > $bin
+	tag="api_version"
+        ;;
+    qs)
+	make
+	prefix="yicesQS-"
+	bin="$dir/yicesQS/_build/default/src/main.exe"
+	;;
+    *)
+	make
+        bin_dir="x86_64-pc-linux-gnu-release/bin"
+	bin="$yices2_dir/build/$bin_dir/yices_smt2"
+	;;
+esac
+
+filename="$prefix$tag$suffix"
+
+echo $filename
+cp "$bin" "$dir/install/$filename"
+
+# Adding variants of exectuable files
+
+case $option in
+    api)
+	echo "Done installing Yices API"
+	;;
+    qs)
+	echo "Done with QS"
+	echo "#!/bin/bash
+$dir/install/$filename -under 10 $opt \$@" > "$dir/install/$filename-under10"
+        chmod a+x "$dir/install/$filename-under10"
+	;;
+    *)
+	echo "#!/bin/bash
+$dir/install/$filename --mcsat $opt \$@" > "$dir/install/$filename.mcsat"
+	chmod a+x "$dir/install/$filename.mcsat"
+	echo "#!/bin/bash
+$dir/install/$filename --mcsat --stats $opt \$@" > "$dir/install/$filename.stats.mcsat"
+        chmod a+x "$dir/install/$filename.stats.mcsat"
+	;;
+esac

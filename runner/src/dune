@@ -1,0 +1,18 @@
+(executable
+ (name benchmark)
+ (public_name benchmark)
+ (libraries containers eio eio_main progress timer str)
+ (preprocess (pps ppx_deriving.std))
+ (promote (until-clean) (into ".."))
+ (modules benchmark excel)
+)
+
+(executable
+ (name wtime)
+ (public_name wtime)
+ (libraries shexp.process core_unix containers timer)
+ (promote (until-clean) (into ".."))
+ (modules wtime)
+)
+
+(env (dev (flags (:standard -warn-error -A))))

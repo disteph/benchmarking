@@ -1,0 +1,26 @@
+opam-version: "2.0"
+name: "benchmark_runner"
+version: "0.1"
+synopsis: "benchmark runner"
+description: "benchmark runner"
+maintainer: "Stephane Graham-Lengrand <stephane.graham-lengrand@csl.sri.com>"
+authors: "Stephane Graham-Lengrand <stephane.graham-lengrand@csl.sri.com>"
+license: "GPLv3"
+homepage: "https://github.com/disteph/bench"
+bug-reports: "https://github.com/disteph/bench/issues"
+depends: [
+  "ocaml" {>= "5.00"}
+  "dune" {build}
+  "ocamlfind" {build}
+  "containers"  {>= "3.0.0"}
+  "core_unix"
+  "shexp"
+  "eio"
+  "eio_main"
+  "domainslib"
+  "progress"
+  "timer"
+]
+build: [
+  make
+]
