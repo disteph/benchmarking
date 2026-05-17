@@ -10,7 +10,7 @@
 (executable
  (name wtime)
  (public_name wtime)
- (libraries shexp.process core_unix containers timer)
+ (libraries core_unix timer unix)
  (promote (until-clean) (into ".."))
  (modules wtime)
 )

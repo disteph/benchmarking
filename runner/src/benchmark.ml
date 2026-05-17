@@ -19,7 +19,16 @@ let massage_out stdout =
   else `Crash(`UnreadableOut, stdout)
 
 let massage_err stderr =
-  match String.lines stderr with
+  let rec last_three = function
+    | _::b::c::d::tl -> last_three (b::c::d::tl)
+    | lines -> lines
+  in
+  let lines =
+    String.lines stderr
+    |> List.filter (fun line -> not (String.equal "" (String.trim line)))
+    |> last_three
+  in
+  match lines with
   | [wall; user; system] ->
      (try
         `Times{ wall = float_of_string wall;
@@ -40,12 +49,23 @@ let write_coe file command interpretation stdout stderr =
        (List.pp ~pp_sep:(fun fmt () -> Format.fprintf fmt " ") String.pp)
        command interpretation stdout stderr)
 
+let wtime_command =
+  let dir = Filename.dirname Sys.executable_name in
+  let candidates = [
+      Filename.concat dir "wtime";
+      Filename.concat dir "wtime.exe";
+    ]
+  in
+  match List.find_opt CCIO.File.exists candidates with
+  | Some command -> command
+  | None -> "wtime"
+
 let with_timing proc_mgr ~timeout ?memory ~log task =
   let timeout = string_of_int timeout in
   let memory  = Option.map string_of_int memory in
   let timer   = Timer.create "timer" in
   let command =
-    "wtime"::
+    wtime_command::
       "-timeout"::timeout::
         match memory with
         | Some memory -> "-memory"::memory::task
@@ -63,10 +83,18 @@ let with_timing proc_mgr ~timeout ?memory ~log task =
         Timer.start timer;
         let output =
           (fun () ->
-            let out = Buf_read.parse_exn Buf_read.take_all out_r ~max_size:max_int in
-            let err = Buf_read.parse_exn Buf_read.take_all err_r ~max_size:max_int in
-            Flow.close out_r;
-            Flow.close err_r;
+            let read_all flow =
+              Fun.protect
+                ~finally:(fun () -> Flow.close flow)
+                (fun () -> Buf_read.parse_exn Buf_read.take_all flow ~max_size:max_int)
+            in
+            let out = ref None in
+            let err = ref None in
+            Fiber.both
+              (fun () -> out := Some(read_all out_r))
+              (fun () -> err := Some(read_all err_r));
+            let out = Option.get_exn_or "missing stdout" !out in
+            let err = Option.get_exn_or "missing stderr" !err in
             match Process.await child with
             | `Exited 0 ->
                begin
@@ -84,9 +112,17 @@ let with_timing proc_mgr ~timeout ?memory ~log task =
                     write_coe log command "Crash: Unreadable err as times" out err;
                     r
                end
-            | _ -> if Float.(Timer.read timer > float_of_string timeout)
-                   then (write_coe log command "Timeout" out err; `Timeout)
-                   else (write_coe log command "Memout" out err; `Memout)
+            | `Exited 124 ->
+               write_coe log command "Timeout" out err;
+               `Timeout
+            | `Exited code ->
+               let interpretation = Format.sprintf "Crash: exited %i" code in
+               write_coe log command interpretation out err;
+               `Crash(`Exception, interpretation)
+            | `Signaled signal ->
+               let interpretation = Format.sprintf "Crash: signaled %i" signal in
+               write_coe log command interpretation out err;
+               `Crash(`Exception, interpretation)
           )();
         in
         Timer.stop timer;
@@ -204,7 +240,11 @@ let tasks proc_mgr generations ~timeout ?memory commands ~prefix ~log lines =
     else Seq.cycle
   in
   let aux ~prefix instance command () =
-    let command  = Filename.(concat current_dir_name) command in
+    let command =
+      if Filename.is_relative command
+      then Filename.(concat current_dir_name command)
+      else command
+    in
     let full_instance = Filename.concat prefix instance in
     let r = with_timing proc_mgr ~timeout ?memory ~log [command; full_instance] in
     prune command, instance, r
@@ -213,40 +253,22 @@ let tasks proc_mgr generations ~timeout ?memory commands ~prefix ~log lines =
   let aux          = Seq.of_list lines |> Seq.map aux |> Seq.flatten in 
   cycle aux
 
-let rec rename ~sep src_path dir basename i suffix =
-  let path = Path.(dir / (basename ^ sep ^ string_of_int i ^ suffix)) in
-  try
-    if CCIO.File.exists (Path.native_exn path)
-    then rename ~sep path dir basename (i+1) suffix;
-    Path.rename src_path path
-  with _ -> ()
-
-let rename_if_exists dir basename suffix =
-  let path = Path.(dir / (basename ^ suffix)) in
-  try
-    if CCIO.File.exists (Path.native_exn path)
-    then rename ~sep:"-" path dir basename 0 suffix
-  with _ -> ()
-
-let rename_sheet_if_exists dir =
-  let path = Path.(dir / "sheet3.xml") in
-  try
-    if CCIO.File.exists (Path.native_exn path)
-    then rename ~sep:"" path dir "sheet" 4 ".xml"
-  with _ -> ()
-
-let use_dir ~pwd ~dir commands =
-  let out_path = Path.(pwd / dir) in
-  begin
-    try Path.mkdir ~perm:0o750 out_path
-    with _ ->
-      (* If path already exists, rename relevant files in it that would be overwritten *)
-      (rename_if_exists out_path "log" "";
-       List.iter
-         (fun command -> rename_if_exists out_path (prune command) ".csv")
-         commands)
-  end;
-  out_path
+let use_dir ~pwd ~dir _commands =
+  let rec create_fresh i =
+    let dirname =
+      if Int.equal i 0 then dir
+      else Format.sprintf "%s-run%i" dir i
+    in
+    let out_path = Path.(pwd / dirname) in
+    try
+      Path.mkdir ~perm:0o750 out_path;
+      out_path
+    with exn ->
+      if CCIO.File.exists (Path.native_exn out_path)
+      then create_fresh (i + 1)
+      else raise exn
+  in
+  create_fresh 0
 
 let rec drain_stream f stream =
   if Fiber.is_cancelled ()
@@ -329,39 +351,35 @@ let hashtables_to_files out_path htbl sort =
   in
   Seq.iter process out_seq
 
-(* Pouring the hashtables into XML files *)
-let hashtables_to_xml out_path htbl sort =
-  let out_seq = HStrings.to_seq htbl in
-  let process (command, res) =
-    let project (instance, r) =
-      match r with
-      | `Answer(Unsat, {wall; user; system}) ->
-         command, instance, "unsat", Some(wall, user, system)
-      | `Answer(Sat,   {wall; user; system}) ->
-         command, instance, "sat", Some(wall, user, system)
-      | `Inconsistent -> command, instance, "inconsistent", None
-      | `Timeout      -> command, instance, "timeout", None
-      | `Memout       -> command, instance, "memout", None
-      | `Crash _msg   -> command, instance, "crash", None
-    in
-    let pp_htable fmt command_tbl =
-      let l = HStrings.to_list command_tbl
-              |> List.map average
-              |> List.sort sort
-              |> List.map project
-      in
-      Excel.pp_table fmt l
-    in
-    rename_sheet_if_exists out_path;
-    let filename = "sheet3.xml" in
-    Switch.run @@
-      fun sw ->
-      let out =
-        Path.(open_out ~sw ~create:(`Exclusive 0o640) (out_path / filename))
-      in
-      Buf_write.(with_flow out @@fun b -> string b @@ Format.sprintf "%a" pp_htable res)
+(* Pouring the hashtables into an Excel-readable HTML spreadsheet. *)
+let hashtables_to_excel out_path htbl sort =
+  let project command (instance, r) =
+    match r with
+    | `Answer(Unsat, {wall; user; system}) ->
+       command, instance, "unsat", Some(wall, user, system)
+    | `Answer(Sat,   {wall; user; system}) ->
+       command, instance, "sat", Some(wall, user, system)
+    | `Inconsistent -> command, instance, "inconsistent", None
+    | `Timeout      -> command, instance, "timeout", None
+    | `Memout       -> command, instance, "memout", None
+    | `Crash _msg   -> command, instance, "crash", None
   in
-  Seq.iter process out_seq
+  let rows =
+    HStrings.to_list htbl
+    |> List.sort (fun (c1, _) (c2, _) -> String.compare_natural c1 c2)
+    |> List.flat_map
+         (fun (command, command_tbl) ->
+           HStrings.to_list command_tbl
+           |> List.map average
+           |> List.sort sort
+           |> List.map (project command))
+  in
+  Switch.run @@
+    fun sw ->
+    let out =
+      Path.(open_out ~sw ~create:(`Exclusive 0o640) (out_path / "results.xls"))
+    in
+    Buf_write.(with_flow out @@fun b -> string b @@ Format.sprintf "%a" Excel.pp_table rows)
 
 
 let catch_sig signal_code =
@@ -375,7 +393,7 @@ let timeout = ref 300
 let memory  = ref None
 let sort    = ref (fun (i1,_) (i2,_) -> String.compare_natural i1 i2)
 let generations = ref 1
-let xml = ref false
+let excel = ref false
 let description = "Multitask runner.
                    First argument: ASCII file containing list of benchmarks (1 per line)
                    Next arguments: Executables to process each of the benchmarks"
@@ -404,7 +422,8 @@ let options = [
     ("-memory",  Arg.Int(fun u -> memory  := Some u), "Maximum memory in Gb (default is Infinity)");
     ("-timesort",  Arg.String parse_sort, "Sort output by increasing solve time, with argument \"wall\" or \"user\" (default is sort alphabetically)");
     ("-generations", Arg.Int(fun u -> generations := u), "Number of generations (default is 1); use 0 for infinite (stop the runs by sending SIGINT signal, usually with Ctr-C)");
-    ("-xml", Arg.Set xml, "Also output in xml for xlxs (default is false)");
+    ("-excel", Arg.Set excel, "Also output an Excel-readable spreadsheet results.xls (default is false)");
+    ("-xml", Arg.Set excel, "Deprecated alias for -excel");
   ];;
 
 Arg.parse options (fun a->args := a::!args) description;;
@@ -420,6 +439,14 @@ match List.rev !args with
    let nb_benchmarks    = List.length lines in
    let nb_solvers       = List.length commands in
    let nb_jobs          = nb_benchmarks * nb_solvers in
+   if Int.(cores < 1) then (prerr_endline "benchmark: -cores must be at least 1"; exit 2);
+   if Int.(timeout < 1) then (prerr_endline "benchmark: -timeout must be at least 1"; exit 2);
+   Option.iter
+     (fun memory ->
+       if Int.(memory < 1) then (prerr_endline "benchmark: -memory must be at least 1"; exit 2))
+     memory;
+   if Int.(nb_benchmarks = 0) then (prerr_endline "benchmark: benchmark file is empty"; exit 2);
+   if Int.(nb_solvers = 0) then (prerr_endline "benchmark: at least one solver command is required"; exit 2);
    let benchmark_digest =
      let filename = prune benchmark_file in
      match memory with
@@ -500,7 +527,7 @@ match List.rev !args with
 
      (* Pouring the hashtables into files *)
      hashtables_to_files out_path htbl !sort;
-     if !xml then  hashtables_to_xml out_path htbl cmp_user;
+     if !excel then hashtables_to_excel out_path htbl cmp_user;
      traceln "DONE!"
        
 | _ -> print_endline(Arg.usage_string options "Usage is: benchmark [benchmark_file] [command]")
