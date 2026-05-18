@@ -1,4 +1,4 @@
-.PHONY: all pin-timer deps build test clean
+.PHONY: all pin-timer deps build install test clean
 
 OPAMFLAGS ?= --yes
 TIMER_PIN ?= git+https://github.com/disteph/timer.git
@@ -13,6 +13,9 @@ deps: pin-timer
 
 build: deps
 	dune build
+
+install: build
+	dune install
 
 test: deps
 	dune runtest
