@@ -11,13 +11,12 @@ bug-reports: "https://github.com/disteph/bench/issues"
 depends: [
   "ocaml" {>= "5.00"}
   "dune" {build}
-  "ocamlfind" {build}
   "containers"  {>= "3.0.0"}
   "core_unix"
   "eio"
   "eio_main"
+  "ppx_deriving"
   "yojson"
-  "domainslib"
   "progress"
   "timer"
 ]
