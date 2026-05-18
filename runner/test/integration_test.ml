@@ -146,7 +146,7 @@ let start_server ~server ~port ~output_root ~cores ?max_memory log_path =
     @
     match max_memory with
     | None -> []
-    | Some memory -> [ "-max-memory"; string_of_int memory ]
+    | Some memory -> [ "-max-memory"; memory ]
   in
   let pid =
     Fun.protect
@@ -304,6 +304,18 @@ let test_server_output_collision server_root =
   in
   assert_bool "server should create at least one -run1 output directory" (dirs <> [])
 
+let test_server_accepts_terabyte_memory ~server root =
+  let port = free_port () in
+  let output_root = Filename.concat root "server-output-1t" in
+  let server_log = Filename.concat root "server-1t.log" in
+  mkdir_p output_root;
+  let server_pid =
+    start_server ~server ~port ~output_root ~cores:1 ~max_memory:"1T" server_log
+  in
+  Fun.protect
+    ~finally:(fun () -> stop_server server_pid)
+    (fun () -> wait_for_server port)
+
 let absolute_path path =
   if Filename.is_relative path then Filename.concat (Unix.getcwd ()) path else path
 
@@ -332,9 +344,12 @@ let () =
   write_file list_path "sat-case-1.smt2\nsat-case-2.smt2\n";
   write_file (Filename.concat bench_root "sat-case-1.smt2") "(set-logic QF_UF)\n";
   write_file (Filename.concat bench_root "sat-case-2.smt2") "(set-logic QF_UF)\n";
+  test_server_accepts_terabyte_memory ~server root;
   let port = free_port () in
   let server_log = Filename.concat root "server.log" in
-  let server_pid = start_server ~server ~port ~output_root:server_root ~cores:1 ~max_memory:2 server_log in
+  let server_pid =
+    start_server ~server ~port ~output_root:server_root ~cores:1 ~max_memory:"2G" server_log
+  in
   Fun.protect
     ~finally:(fun () -> stop_server server_pid)
     (fun () ->

@@ -373,6 +373,35 @@ let parse_positive name value =
     exit 2);
   value
 
+let ends_with ~suffix s =
+  let ls = String.length s in
+  let lf = String.length suffix in
+  ls >= lf && String.sub s (ls - lf) lf = suffix
+
+let parse_memory_gb name value =
+  let value = String.trim value in
+  let fail () =
+    prerr_endline
+      (Format.sprintf
+         "benchmark-server: %s expects a positive integer GB value, optionally suffixed with G, GB, T, or TB"
+         name);
+    exit 2
+  in
+  let number, multiplier =
+    let upper = String.uppercase_ascii value in
+    if ends_with ~suffix:"TB" upper then
+      (String.sub value 0 (String.length value - 2), 1024)
+    else if ends_with ~suffix:"T" upper then
+      (String.sub value 0 (String.length value - 1), 1024)
+    else if ends_with ~suffix:"GB" upper then
+      (String.sub value 0 (String.length value - 2), 1)
+    else if ends_with ~suffix:"G" upper then
+      (String.sub value 0 (String.length value - 1), 1)
+    else (value, 1)
+  in
+  try parse_positive name (int_of_string (String.trim number) * multiplier)
+  with Failure _ -> fail ()
+
 let () =
   let host = ref "127.0.0.1" in
   let port = ref 8765 in
@@ -385,7 +414,9 @@ let () =
       ("-host", Arg.Set_string host, "Host/interface to bind (default 127.0.0.1)");
       ("-port", Arg.Set_int port, "TCP port to bind (default 8765)");
       ("-cores", Arg.Set_int cores, "Maximum concurrent jobs");
-      ("-max-memory", Arg.Int (fun m -> max_memory := Some m), "Total memory budget in Gb");
+      ( "-max-memory",
+        Arg.String (fun m -> max_memory := Some (parse_memory_gb "-max-memory" m)),
+        "Total memory budget in GB; suffixes G, GB, T, and TB are accepted" );
       ("-output-root", Arg.Set_string output_root, "Directory where batch output directories are created");
       ("-server-log", Arg.String (fun path -> server_log := Some path), "Append server activity to this file");
     ]
