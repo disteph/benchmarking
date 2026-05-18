@@ -1,10 +1,24 @@
+(library
+ (name runner_lib)
+ (libraries containers eio timer yojson unix)
+ (preprocess (pps ppx_deriving.std))
+ (modules common protocol excel)
+)
+
 (executable
  (name benchmark)
  (public_name benchmark)
- (libraries containers eio eio_main progress timer str)
- (preprocess (pps ppx_deriving.std))
+ (libraries containers eio eio_main runner_lib)
  (promote (until-clean) (into ".."))
- (modules benchmark excel)
+ (modules benchmark)
+)
+
+(executable
+ (name benchmark_server)
+ (public_name benchmark-server)
+ (libraries eio eio_main runner_lib)
+ (promote (until-clean) (into ".."))
+ (modules benchmark_server)
 )
 
 (executable
