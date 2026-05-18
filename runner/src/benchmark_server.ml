@@ -17,6 +17,8 @@ and batch = {
   htbl : (int * Common.aggregate) Common.HStrings.t Common.HStrings.t;
   log : string Stream.t;
   log_done : bool ref;
+  log_drained : Eio.Condition.t;
+  mutable log_closed : bool;
   watchers : Protocol.event Stream.t list ref;
   total_jobs : int;
   prior_jobs : int;
@@ -71,6 +73,30 @@ let remove_watcher batch events =
 
 let publish batch event =
   List.iter (fun events -> Stream.add events event) !(batch.watchers)
+
+let output_file_names batch =
+  Common.result_file_names ~excel:batch.request.excel batch.htbl
+
+let output_file_events batch =
+  output_file_names batch
+  |> List.filter_map (fun name ->
+         let name = Common.safe_output_file_name name in
+         let path = Filename.concat batch.out_dir name in
+         if Sys.file_exists path then
+           Some
+             (Output_file
+                {
+                  batch_id = batch.id;
+                  name;
+                  contents = Protocol.base64_encode (Common.read_file_binary path);
+                })
+         else None)
+
+let publish_output_files batch =
+  List.iter (publish batch) (output_file_events batch)
+
+let send_output_files writer batch =
+  List.iter (send_event writer) (output_file_events batch)
 
 let unfinished_jobs batch =
   match batch.status with
@@ -141,7 +167,11 @@ let finish_batch state batch =
         Common.hashtables_to_excel_native batch.out_dir batch.htbl Common.cmp_user;
       batch.log_done := true;
       Stream.add batch.log "";
+      while not batch.log_closed do
+        Eio.Condition.await_no_mutex batch.log_drained
+      done;
       batch.status <- Finished;
+      publish_output_files batch;
       publish batch (Batch_finished { batch_id = batch.id; output_dir = batch.out_dir });
       state.log_server
         (Format.sprintf "batch %s finished in %s" batch.id batch.out_dir)
@@ -217,7 +247,7 @@ let create_batch state (request : Protocol.submit_request) =
     Common.digest ~benchmark_file:request.benchmark_name ~lines:request.lines
       ~timeout:request.timeout ?memory:request.memory ()
   in
-  let out_dir = Common.fresh_dir_native ~root:state.output_root ~dir:digest in
+  let out_dir = Common.fresh_output_dir_native ~root:state.output_root ~output_dir:digest in
   let total_jobs = List.length request.lines * List.length request.commands * request.generations in
   let prior_jobs = prior_jobs state in
   let batch =
@@ -229,6 +259,8 @@ let create_batch state (request : Protocol.submit_request) =
       htbl = Common.HStrings.create (List.length request.commands);
       log = Stream.create max_int;
       log_done = ref false;
+      log_drained = Eio.Condition.create ();
+      log_closed = false;
       watchers = ref [];
       total_jobs;
       prior_jobs;
@@ -264,7 +296,11 @@ let start_log_drain sw batch =
         let s = Stream.take batch.log in
         output_string ch s;
         flush ch;
-        if !(batch.log_done) && Stream.is_empty batch.log then close_out ch else loop ()
+        if !(batch.log_done) && Stream.is_empty batch.log then (
+          close_out ch;
+          batch.log_closed <- true;
+          Eio.Condition.broadcast batch.log_drained)
+        else loop ()
       in
       loop ();
       `Stop_daemon)
@@ -296,6 +332,7 @@ let watch_stream writer batch events =
       match batch.status with
       | Running -> drain_events writer events
       | Finished ->
+          send_output_files writer batch;
           send_event writer
             (Batch_finished { batch_id = batch.id; output_dir = batch.out_dir })
       | Failed message -> send_event writer (Batch_failed { batch_id = batch.id; message }))

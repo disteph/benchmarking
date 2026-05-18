@@ -78,6 +78,7 @@ let print_event = function
       Printf.printf "accepted job id %s (%d jobs%s), output %s\n%!" batch_id total_jobs
         waiting output_dir
   | Protocol.Queue_progress _ -> ()
+  | Protocol.Output_file _ -> ()
   | Protocol.Job_finished { completed; total; solver; benchmark; result; _ } ->
       Printf.printf "[%d/%d] %s %s -> %s\n%!" completed total solver benchmark result
   | Protocol.Batch_finished { batch_id; output_dir } ->
@@ -122,7 +123,29 @@ let print_final_event = function
       Printf.eprintf "%s: %s\n%!" prefix message
   | event -> print_event event
 
-let wait_with_progress reader ~initial_prior_completed ~prior_total ~initial_completed ~total =
+let ensure_local_output_dir local_output_dir server_output_dir =
+  match !local_output_dir with
+  | Some dir -> dir
+  | None ->
+      let dir = Common.fresh_output_dir_native ~root:(Sys.getcwd ()) ~output_dir:server_output_dir in
+      local_output_dir := Some dir;
+      dir
+
+let write_output_file local_output_dir ~name ~contents =
+  let dir =
+    match !local_output_dir with
+    | Some dir -> dir
+    | None -> ensure_local_output_dir local_output_dir "benchmark-output"
+  in
+  let path = Filename.concat dir (Common.safe_output_file_name name) in
+  Common.write_file_binary path (Protocol.base64_decode contents)
+
+let print_download_dir = function
+  | Some dir -> Printf.printf "downloaded output files to %s\n%!" dir
+  | None -> ()
+
+let wait_with_progress reader ~local_output_dir ~initial_prior_completed ~prior_total
+    ~initial_completed ~total =
   let prior_completed = ref 0 in
   let completed = ref 0 in
   let apply_prior_completed update_progress new_completed =
@@ -149,6 +172,9 @@ let wait_with_progress reader ~initial_prior_completed ~prior_total ~initial_com
       | Protocol.Queue_progress { completed = new_completed; _ } ->
           apply_prior_completed update_progress new_completed;
           loop ()
+      | Protocol.Output_file { name; contents; _ } ->
+          write_output_file local_output_dir ~name ~contents;
+          loop ()
       | Protocol.Job_finished { completed = new_completed; _ } ->
           apply_completed update_progress new_completed;
           loop ()
@@ -169,6 +195,9 @@ let wait_with_progress reader ~initial_prior_completed ~prior_total ~initial_com
     loop ()
   in
   print_final_event final_event;
+  (match final_event with
+  | Protocol.Batch_finished _ -> print_download_dir !local_output_dir
+  | _ -> ());
   code
 
 let submit ~detach_after_accept request =
@@ -180,18 +209,27 @@ let submit ~detach_after_accept request =
   send_line writer (Protocol.encode_request request);
   let first_event = Buf_read.line reader |> Protocol.decode_event in
   print_event first_event;
+  let local_output_dir = ref None in
+  (match first_event with
+  | Protocol.Accepted { output_dir; _ } when not detach_after_accept ->
+      ignore (ensure_local_output_dir local_output_dir output_dir)
+  | _ -> ());
   match first_event with
   | Protocol.Accepted _ when detach_after_accept -> 0
   | Protocol.Accepted { total_jobs; completed; prior_jobs; prior_completed; _ } ->
-      wait_with_progress reader ~initial_prior_completed:prior_completed
+      wait_with_progress reader ~local_output_dir ~initial_prior_completed:prior_completed
         ~prior_total:prior_jobs ~initial_completed:completed ~total:total_jobs
   | Protocol.Batch_finished _ -> 0
   | Protocol.Batch_failed _ -> 1
   | Protocol.Job_finished { completed; total; _ } ->
-      wait_with_progress reader ~initial_prior_completed:0 ~prior_total:0
+      wait_with_progress reader ~local_output_dir ~initial_prior_completed:0 ~prior_total:0
         ~initial_completed:completed ~total
   | Protocol.Queue_progress { completed; total; _ } ->
-      wait_with_progress reader ~initial_prior_completed:completed ~prior_total:total
+      wait_with_progress reader ~local_output_dir ~initial_prior_completed:completed
+        ~prior_total:total ~initial_completed:0 ~total:1
+  | Protocol.Output_file { name; contents; _ } ->
+      write_output_file local_output_dir ~name ~contents;
+      wait_with_progress reader ~local_output_dir ~initial_prior_completed:0 ~prior_total:0
         ~initial_completed:0 ~total:1
 
 let options =

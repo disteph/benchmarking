@@ -176,6 +176,43 @@ let fresh_dir_native ~root ~dir =
   in
   create_fresh 0
 
+let output_dir_name_from_path path =
+  match Filename.basename path with
+  | "" | "." | ".." -> "benchmark-output"
+  | name -> name
+
+let fresh_output_dir_native ~root ~output_dir =
+  fresh_dir_native ~root ~dir:(output_dir_name_from_path output_dir)
+
+let safe_output_file_name name =
+  if
+    String.equal name ""
+    || String.equal name "."
+    || String.equal name ".."
+    || not (String.equal (Filename.basename name) name)
+  then invalid_arg ("unsafe output file name: " ^ name);
+  name
+
+let result_file_names ~excel htbl =
+  let csvs =
+    HStrings.to_list htbl
+    |> List.map (fun (command, _) -> safe_output_file_name (command ^ ".csv"))
+    |> List.sort String.compare
+  in
+  [ "log" ] @ csvs @ if excel then [ "results.xls" ] else []
+
+let read_file_binary path =
+  let ch = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in ch)
+    (fun () -> really_input_string ch (in_channel_length ch))
+
+let write_file_binary path contents =
+  let ch = open_out_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_out ch)
+    (fun () -> output_string ch contents)
+
 let rec drain_stream f stream =
   if Fiber.is_cancelled () then
     match Stream.take_nonblocking stream with

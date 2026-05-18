@@ -35,8 +35,59 @@ type event =
       benchmark : string;
       result : string;
     }
+  | Output_file of { batch_id : string; name : string; contents : string }
   | Batch_finished of { batch_id : string; output_dir : string }
   | Batch_failed of { batch_id : string; message : string }
+
+let base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+let base64_encode s =
+  let len = String.length s in
+  let out = Buffer.create (((len + 2) / 3) * 4) in
+  let emit i = Buffer.add_char out base64_alphabet.[i land 0x3f] in
+  let rec loop i =
+    if i < len then (
+      let b0 = Char.code s.[i] in
+      let b1 = if i + 1 < len then Char.code s.[i + 1] else 0 in
+      let b2 = if i + 2 < len then Char.code s.[i + 2] else 0 in
+      emit (b0 lsr 2);
+      emit (((b0 land 0x03) lsl 4) lor (b1 lsr 4));
+      if i + 1 < len then emit (((b1 land 0x0f) lsl 2) lor (b2 lsr 6))
+      else Buffer.add_char out '=';
+      if i + 2 < len then emit b2 else Buffer.add_char out '=';
+      loop (i + 3))
+  in
+  loop 0;
+  Buffer.contents out
+
+let base64_value = function
+  | 'A' .. 'Z' as c -> Char.code c - Char.code 'A'
+  | 'a' .. 'z' as c -> 26 + Char.code c - Char.code 'a'
+  | '0' .. '9' as c -> 52 + Char.code c - Char.code '0'
+  | '+' -> 62
+  | '/' -> 63
+  | '=' -> -1
+  | c -> invalid_arg (Printf.sprintf "invalid base64 character: %C" c)
+
+let base64_decode s =
+  let len = String.length s in
+  if len mod 4 <> 0 then invalid_arg "invalid base64 length";
+  let out = Buffer.create ((len / 4) * 3) in
+  let rec loop i =
+    if i < len then (
+      let a = base64_value s.[i] in
+      let b = base64_value s.[i + 1] in
+      let c = base64_value s.[i + 2] in
+      let d = base64_value s.[i + 3] in
+      if a < 0 || b < 0 then invalid_arg "invalid base64 padding";
+      Buffer.add_char out (Char.chr ((a lsl 2) lor (b lsr 4)));
+      if c >= 0 then (
+        Buffer.add_char out (Char.chr (((b land 0x0f) lsl 4) lor (c lsr 2)));
+        if d >= 0 then Buffer.add_char out (Char.chr (((c land 0x03) lsl 6) lor d)));
+      loop (i + 4))
+  in
+  loop 0;
+  Buffer.contents out
 
 let member name fields =
   match List.assoc_opt name fields with
@@ -147,6 +198,14 @@ let event_to_yojson = function
           ("benchmark", `String benchmark);
           ("result", `String result);
         ]
+  | Output_file { batch_id; name; contents } ->
+      `Assoc
+        [
+          ("event", `String "output_file");
+          ("batch_id", `String batch_id);
+          ("name", `String name);
+          ("contents", `String contents);
+        ]
   | Batch_finished { batch_id; output_dir } ->
       `Assoc
         [
@@ -200,6 +259,13 @@ let event_of_yojson = function
               solver = as_string (member "solver" fields);
               benchmark = as_string (member "benchmark" fields);
               result = as_string (member "result" fields);
+            }
+      | "output_file" ->
+          Output_file
+            {
+              batch_id = as_string (member "batch_id" fields);
+              name = as_string (member "name" fields);
+              contents = as_string (member "contents" fields);
             }
       | "batch_finished" ->
           Batch_finished
