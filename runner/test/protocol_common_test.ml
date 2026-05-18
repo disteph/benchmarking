@@ -14,10 +14,10 @@ let assert_raises msg f =
 
 let submit_request =
   {
-    Protocol.cwd = "/client/cwd";
-    benchmark_file = "lists/benchmarks.txt";
-    benchmark_prefix = "lists";
+    Protocol.benchmark_file = "lists/benchmarks.txt";
     benchmark_name = "benchmarks";
+    server_benchmark_root = "/server/benchmarks";
+    server_exe_root = "/server/solvers";
     lines = [ "a.smt2"; "b.smt2" ];
     commands = [ "./solver"; "/bin/echo" ];
     timeout = 30;
@@ -31,8 +31,10 @@ let submit_request =
 let test_submit_roundtrip () =
   match Protocol.encode_request (Submit submit_request) |> Protocol.decode_request with
   | Submit r ->
-      assert_equal "cwd" submit_request.cwd r.cwd;
       assert_equal "benchmark_file" submit_request.benchmark_file r.benchmark_file;
+      assert_equal "server_benchmark_root" submit_request.server_benchmark_root
+        r.server_benchmark_root;
+      assert_equal "server_exe_root" submit_request.server_exe_root r.server_exe_root;
       assert_int "timeout" submit_request.timeout r.timeout;
       assert_int "generations" submit_request.generations r.generations;
       assert_bool "excel" r.excel

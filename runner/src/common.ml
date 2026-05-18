@@ -142,13 +142,12 @@ let with_timing proc_mgr ~timeout ?memory ~log task =
 
 let prune filename = Filename.(filename |> basename |> remove_extension)
 
-let make_absolute ~cwd path =
-  if Filename.is_relative path then Filename.concat cwd path else path
+let resolve_server_path ~root path =
+  if Filename.is_relative path then Filename.concat root path else path
 
-let benchmark_path ~cwd ~prefix instance =
-  make_absolute ~cwd (Filename.concat prefix instance)
+let benchmark_path ~root instance = resolve_server_path ~root instance
 
-let solver_path ~cwd command = make_absolute ~cwd command
+let solver_path ~root command = resolve_server_path ~root command
 
 let digest ~benchmark_file ~lines ~timeout ?memory () =
   let filename = prune benchmark_file in

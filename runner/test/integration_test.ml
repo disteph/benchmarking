@@ -200,15 +200,20 @@ let assert_csv_contains_sat dir solver_name =
 let run_client ~client ~client_cwd ~port args =
   run_capture ~cwd:client_cwd client ("-server" :: ("127.0.0.1:" ^ string_of_int port) :: args)
 
+let with_server_roots ~bench_root ~exe_root args =
+  "-server-benchmark-root" :: bench_root :: "-server-exe-root" :: exe_root :: args
+
 let test_client_cores_rejected ~client ~client_cwd list_path solver =
   let result = run_capture ~cwd:client_cwd client [ "-cores"; "2"; list_path; solver ] in
   assert_exit "client -cores rejection" 2 result;
   assert_bool "client -cores message" (contains ~needle:"-cores is now" result.output)
 
-let test_normal_submit_and_transfer ~client ~client_cwd ~port list_path solver =
+let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_root list_path
+    solver =
   let result =
     run_client ~client ~client_cwd ~port
-      [ "-timeout"; "5"; "-excel"; list_path; solver ]
+      (with_server_roots ~bench_root ~exe_root
+         [ "-timeout"; "5"; "-excel"; list_path; solver ])
   in
   assert_exit "normal submit" 0 result;
   assert_bool "accepted id printed" (contains ~needle:"accepted job id batch-" result.output);
@@ -217,10 +222,10 @@ let test_normal_submit_and_transfer ~client ~client_cwd ~port list_path solver =
   assert_csv_contains_sat dir "sat_solver";
   dir
 
-let test_detach_and_reconnect ~client ~client_cwd ~port list_path solver =
+let test_detach_and_reconnect ~client ~client_cwd ~port ~bench_root ~exe_root list_path solver =
   let detach =
     run_client ~client ~client_cwd ~port
-      [ "-timeout"; "5"; "-detach"; list_path; solver ]
+      (with_server_roots ~bench_root ~exe_root [ "-timeout"; "5"; "-detach"; list_path; solver ])
   in
   assert_exit "detach submit" 0 detach;
   let batch_id = batch_id_of_output detach.output in
@@ -231,27 +236,46 @@ let test_detach_and_reconnect ~client ~client_cwd ~port list_path solver =
   assert_csv_contains_sat dir "sat_solver";
   dir
 
-let test_relative_paths ~client ~client_cwd ~port =
+let test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_root =
   let list_dir = Filename.concat client_cwd "relative-list" in
   let list_path = Filename.concat list_dir "benchmarks.txt" in
-  let case_path = Filename.concat list_dir "case.smt2" in
-  let solver_path = Filename.concat client_cwd "relative_solver.sh" in
+  let case_path = Filename.concat bench_root "nested/case.smt2" in
+  let solver_path = Filename.concat exe_root "relative_solver.sh" in
   write_file case_path "(set-logic QF_UF)\n";
-  write_file list_path "case.smt2\n";
+  write_file list_path "nested/case.smt2\n";
   make_solver solver_path "test -f \"$1\" || exit 43\necho sat\n";
   let result =
     run_client ~client ~client_cwd ~port
-      [ "-timeout"; "5"; "relative-list/benchmarks.txt"; "./relative_solver.sh" ]
+      (with_server_roots ~bench_root ~exe_root
+         [ "-timeout"; "5"; "relative-list/benchmarks.txt"; "relative_solver.sh" ])
   in
-  assert_exit "relative paths" 0 result;
+  assert_exit "server root relative paths" 0 result;
   let dir = download_dir_of_output result.output in
   assert_files_exact dir [ "log"; "relative_solver.csv" ];
   assert_csv_contains_sat dir "relative_solver"
 
-let test_memory_rejection ~client ~client_cwd ~port list_path solver =
+let test_absolute_server_paths ~client ~client_cwd ~port ~bench_root ~exe_root =
+  let absolute_case = Filename.concat bench_root "absolute-case.smt2" in
+  let absolute_solver = Filename.concat exe_root "absolute_solver.sh" in
+  let list_path = Filename.concat client_cwd "absolute-list.txt" in
+  write_file absolute_case "(set-logic QF_UF)\n";
+  write_file list_path (absolute_case ^ "\n");
+  make_solver absolute_solver "test -f \"$1\" || exit 44\necho sat\n";
   let result =
     run_client ~client ~client_cwd ~port
-      [ "-timeout"; "5"; "-memory"; "3"; list_path; solver ]
+      (with_server_roots ~bench_root:"/no/such/benchmark/root" ~exe_root:"/no/such/exe/root"
+         [ "-timeout"; "5"; list_path; absolute_solver ])
+  in
+  assert_exit "absolute server paths" 0 result;
+  let dir = download_dir_of_output result.output in
+  assert_files_exact dir [ "absolute_solver.csv"; "log" ];
+  assert_csv_contains_sat dir "absolute_solver"
+
+let test_memory_rejection ~client ~client_cwd ~port ~bench_root ~exe_root list_path solver =
+  let result =
+    run_client ~client ~client_cwd ~port
+      (with_server_roots ~bench_root ~exe_root
+         [ "-timeout"; "5"; "-memory"; "3"; list_path; solver ])
   in
   assert_exit "memory rejection" 1 result;
   assert_bool "memory rejection message"
@@ -262,9 +286,11 @@ let test_unknown_reconnect ~client ~client_cwd ~port =
   assert_exit "unknown reconnect" 1 result;
   assert_bool "unknown reconnect message" (contains ~needle:"unknown job id" result.output)
 
-let test_timeout_classification ~client ~client_cwd ~port list_path timeout_solver =
+let test_timeout_classification ~client ~client_cwd ~port ~bench_root ~exe_root list_path
+    timeout_solver =
   let result =
-    run_client ~client ~client_cwd ~port [ "-timeout"; "1"; list_path; timeout_solver ]
+    run_client ~client ~client_cwd ~port
+      (with_server_roots ~bench_root ~exe_root [ "-timeout"; "1"; list_path; timeout_solver ])
   in
   assert_exit "timeout classification" 0 result;
   let dir = download_dir_of_output result.output in
@@ -291,9 +317,11 @@ let () =
   in
   let root = fresh_root () in
   let client_cwd = Filename.concat root "client" in
+  let bench_root = Filename.concat root "server-benchmarks" in
   let server_root = Filename.concat root "server-output" in
   let solver_dir = Filename.concat root "solvers" in
   mkdir_p client_cwd;
+  mkdir_p bench_root;
   mkdir_p server_root;
   mkdir_p solver_dir;
   let sat_solver = Filename.concat solver_dir "sat_solver.sh" in
@@ -302,6 +330,8 @@ let () =
   make_solver timeout_solver "sleep 3\necho sat\n";
   let list_path = Filename.concat client_cwd "benchmarks.txt" in
   write_file list_path "sat-case-1.smt2\nsat-case-2.smt2\n";
+  write_file (Filename.concat bench_root "sat-case-1.smt2") "(set-logic QF_UF)\n";
+  write_file (Filename.concat bench_root "sat-case-2.smt2") "(set-logic QF_UF)\n";
   let port = free_port () in
   let server_log = Filename.concat root "server.log" in
   let server_pid = start_server ~server ~port ~output_root:server_root ~cores:1 ~max_memory:2 server_log in
@@ -311,16 +341,21 @@ let () =
       wait_for_server port;
       test_client_cores_rejected ~client ~client_cwd list_path sat_solver;
       let first_dir =
-        test_normal_submit_and_transfer ~client ~client_cwd ~port list_path sat_solver
+        test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root
+          ~exe_root:solver_dir list_path "sat_solver.sh"
       in
       let reconnect_dir =
-        test_detach_and_reconnect ~client ~client_cwd ~port list_path sat_solver
+        test_detach_and_reconnect ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir
+          list_path "sat_solver.sh"
       in
       assert_bool "client reconnect download should use -runN"
         (starts_with ~prefix:(Filename.basename first_dir ^ "-run") (Filename.basename reconnect_dir));
-      test_relative_paths ~client ~client_cwd ~port;
-      test_memory_rejection ~client ~client_cwd ~port list_path sat_solver;
+      test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
+      test_absolute_server_paths ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
+      test_memory_rejection ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir list_path
+        "sat_solver.sh";
       test_unknown_reconnect ~client ~client_cwd ~port;
-      test_timeout_classification ~client ~client_cwd ~port list_path timeout_solver;
+      test_timeout_classification ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir
+        list_path "timeout_solver.sh";
       test_server_output_collision server_root);
   print_endline "integration tests passed"

@@ -48,7 +48,7 @@ The harness includes:
 - local client/server integration tests
 - normal submit/wait with result transfer
 - detach and reconnect
-- relative benchmark list and solver paths
+- server-side benchmark and executable roots for relative job paths
 - server and client `-runN` output directory collision behavior
 - max-memory rejection
 - timeout classification
@@ -75,9 +75,13 @@ Common server options:
 - `-max-memory GB`
   Total memory budget across concurrent jobs.
 - `-output-root DIR`
-  Directory where the server writes batch output directories.
+  Directory where the server writes batch output directories. If `DIR` is
+  relative, it is relative to the server process's current working directory.
+  Default is `.`.
 - `-server-log FILE`
-  Append server activity messages to a file.
+  Append server activity messages to a file. If `FILE` is relative, it is
+  relative to the server process's current working directory. By default, no
+  server log file is written; messages go to the server trace output.
 
 The server keeps its queue and reconnect table in memory. If the server exits,
 queued/running job state and reconnect job ids are lost, although files already
@@ -94,7 +98,15 @@ benchmark [options] BENCHMARK_LIST SOLVER [SOLVER ...]
 Example:
 
 ```sh
-benchmark -server 127.0.0.1:8765 -timeout 60 -memory 8 -excel benchmarks.txt ./solver-a ./solver-b
+benchmark \
+  -server 127.0.0.1:8765 \
+  -server-benchmark-root /server/benchmarks \
+  -server-exe-root /server/solvers \
+  -timeout 60 \
+  -memory 8 \
+  -excel \
+  benchmarks.txt \
+  solver-a solver-b
 ```
 
 The client reads `BENCHMARK_LIST` locally and sends the list contents to the
@@ -104,6 +116,17 @@ Client options:
 
 - `-server HOST:PORT`
   Server endpoint. Defaults to `BENCHMARK_SERVER`, then `127.0.0.1:8765`.
+- `-server-benchmark-root DIR`
+  Server-visible root for relative benchmark entries. If `DIR` is relative, it
+  is interpreted by the server relative to the server process's current working
+  directory. If omitted, the client sends the local directory containing
+  `BENCHMARK_LIST`, made absolute from the client process's current working
+  directory when needed.
+- `-server-exe-root DIR`
+  Server-visible root for relative solver commands. If `DIR` is relative, it is
+  interpreted by the server relative to the server process's current working
+  directory. If omitted, the client sends the client process's current working
+  directory.
 - `-timeout SECONDS`
   Per-job timeout. Default is `300`.
 - `-memory GB`
@@ -126,21 +149,85 @@ migration message.
 
 ## Paths
 
-The client sends:
+The benchmark list file itself is read locally by the client. It does not need
+to exist on the server.
 
-- its current working directory
-- the benchmark list path
-- the benchmark prefix, normally the benchmark list file's directory
-- the benchmark list contents
-- solver command paths
+Path inputs are interpreted as follows:
 
-The server resolves relative benchmark entries and relative solver commands
-using the submitted client path information. This works when the client and
-server share the same filesystem layout or compatible mounts.
+| Input | Interpreted by | If relative |
+| --- | --- | --- |
+| server `-output-root DIR` | server | relative to the server process's current working directory |
+| server `-server-log FILE` | server | relative to the server process's current working directory |
+| client `BENCHMARK_LIST` argument | client | relative to the client process's current working directory |
+| client `-server-benchmark-root DIR` | server | relative to the server process's current working directory |
+| client `-server-exe-root DIR` | server | relative to the server process's current working directory |
+| benchmark entry inside `BENCHMARK_LIST` | server | relative to `-server-benchmark-root` |
+| solver command argument | server | relative to `-server-exe-root` |
+| downloaded result directory | client | created in the client process's current working directory |
 
-The benchmark list file itself may be local to the client, but the actual
-benchmark instance paths and solver command paths must be visible and executable
-from the server.
+The paths used for execution are server-side paths:
+
+- relative benchmark entries are resolved under `-server-benchmark-root`
+- relative solver commands are resolved under `-server-exe-root`
+- absolute benchmark entries and absolute solver commands are used as explicit
+  server-side absolute paths
+- relative `-server-benchmark-root` and `-server-exe-root` values are
+  themselves interpreted relative to the server process's current working
+  directory
+
+The client working directory is not used for server-side execution path
+resolution. This allows the client and server to run on different machines with
+different filesystem layouts.
+
+Example:
+
+```sh
+benchmark \
+  -server host:8765 \
+  -server-benchmark-root /srv/smtlib \
+  -server-exe-root /opt/solvers \
+  local-list.txt \
+  yices-smt2
+```
+
+If `local-list.txt` contains:
+
+```text
+QF_BV/foo.smt2
+```
+
+the server runs:
+
+```text
+/opt/solvers/yices-smt2 /srv/smtlib/QF_BV/foo.smt2
+```
+
+If either path is absolute, it is treated as an absolute path on the server.
+
+For local single-machine use, if roots are omitted the client defaults them to
+local paths based on the benchmark list directory and current working directory.
+For multi-machine use, pass both roots explicitly.
+
+When `-server-benchmark-root` is omitted, the client sends the local benchmark
+list directory as the server benchmark root. If the list path was relative, the
+client first makes that directory absolute using the client process's current
+working directory. When `-server-exe-root` is omitted, the client sends the
+client process's current working directory as the server executable root. These
+defaults are only appropriate when those local paths are also valid on the
+server.
+
+Default path behavior summary:
+
+- server `-output-root` omitted: server uses `.` under the server process's
+  current working directory
+- server `-server-log` omitted: no log file is opened
+- client `-server-benchmark-root` omitted: client sends the benchmark list
+  directory, made absolute on the client if necessary
+- client `-server-exe-root` omitted: client sends the client process's current
+  working directory
+- downloaded result directory: always created under the client process's current
+  working directory using the server output directory basename, with `-runN` if
+  needed
 
 ## Queueing And Progress
 
@@ -227,6 +314,11 @@ a local directory in the client's current working directory, based on the server
 output directory's basename. If a local directory already exists, the client
 also uses `-runN`.
 
+The server output directory path in the `accepted` event may be absolute or
+relative depending on how the server was configured. The client does not use
+that path as a destination path. It only uses the basename to choose a local
+download directory under the client process's current working directory.
+
 Only directories get `-runN`. File names transferred from server to client do
 not contain counting suffixes. They remain exactly:
 
@@ -272,13 +364,27 @@ benchmark-server -cores 4 -max-memory 32 -output-root /tmp/benchmark-results
 Submit and wait:
 
 ```sh
-benchmark -server 127.0.0.1:8765 -timeout 120 -memory 4 examples.txt ./solver
+benchmark \
+  -server 127.0.0.1:8765 \
+  -server-benchmark-root /tmp/benchmarks \
+  -server-exe-root /tmp/solvers \
+  -timeout 120 \
+  -memory 4 \
+  examples.txt \
+  solver
 ```
 
 Submit and detach:
 
 ```sh
-benchmark -server 127.0.0.1:8765 -timeout 120 -detach examples.txt ./solver
+benchmark \
+  -server 127.0.0.1:8765 \
+  -server-benchmark-root /tmp/benchmarks \
+  -server-exe-root /tmp/solvers \
+  -timeout 120 \
+  -detach \
+  examples.txt \
+  solver
 ```
 
 Reconnect later:
@@ -290,7 +396,13 @@ benchmark -server 127.0.0.1:8765 -reconnect batch-000001
 Generate Excel output:
 
 ```sh
-benchmark -server 127.0.0.1:8765 -excel examples.txt ./solver-a ./solver-b
+benchmark \
+  -server 127.0.0.1:8765 \
+  -server-benchmark-root /tmp/benchmarks \
+  -server-exe-root /tmp/solvers \
+  -excel \
+  examples.txt \
+  solver-a solver-b
 ```
 
 Expose a server on a trusted network:
@@ -302,11 +414,17 @@ benchmark-server -host 0.0.0.0 -port 9000 -cores 16 -max-memory 128 -output-root
 Then submit from a client:
 
 ```sh
-benchmark -server server.example.org:9000 examples.txt /shared/solvers/yices
+benchmark \
+  -server server.example.org:9000 \
+  -server-benchmark-root /srv/smtlib \
+  -server-exe-root /opt/solvers \
+  local-list.txt \
+  yices
 ```
 
-The benchmark instance paths and solver path in this example must be meaningful
-on the server.
+The benchmark list file in this example is local to the client. The benchmark
+entries in that file are resolved under `/srv/smtlib` on the server, and the
+relative solver command `yices` is resolved under `/opt/solvers` on the server.
 
 ## Current Limitations
 

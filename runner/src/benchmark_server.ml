@@ -184,8 +184,8 @@ let finish_batch state batch =
 let run_job proc_mgr state job =
   let batch = job.batch in
   let request = batch.request in
-  let solver = Common.solver_path ~cwd:request.cwd job.solver in
-  let instance = Common.benchmark_path ~cwd:request.cwd ~prefix:request.benchmark_prefix job.benchmark in
+  let solver = Common.solver_path ~root:request.server_exe_root job.solver in
+  let instance = Common.benchmark_path ~root:request.server_benchmark_root job.benchmark in
   let result =
     Common.with_timing proc_mgr ~timeout:request.timeout ?memory:request.memory
       ~log:batch.log [ solver; instance ]

@@ -11,6 +11,8 @@ let detach = ref false
 let server = ref (Sys.getenv_opt "BENCHMARK_SERVER" |> Option.value ~default:"127.0.0.1:8765")
 let cores_was_used = ref None
 let reconnect = ref None
+let server_benchmark_root = ref None
+let server_exe_root = ref None
 
 let parse_sort = function
   | "wall" -> sort := "wall"
@@ -64,6 +66,23 @@ let validate_input benchmark_file commands =
   if not (Sys.file_exists benchmark_file) then (
     prerr_endline ("benchmark: benchmark file does not exist: " ^ benchmark_file);
     exit 2)
+
+let local_default_root path =
+  let dir = Filename.dirname path in
+  if Filename.is_relative dir then Filename.concat (Sys.getcwd ()) dir else dir
+
+let require_server_roots benchmark_file =
+  let benchmark_root =
+    match !server_benchmark_root with
+    | Some root -> root
+    | None -> local_default_root benchmark_file
+  in
+  let exe_root =
+    match !server_exe_root with
+    | Some root -> root
+    | None -> Sys.getcwd ()
+  in
+  (benchmark_root, exe_root)
 
 let send_line writer line =
   Buf_write.string writer line;
@@ -246,6 +265,12 @@ let options =
     ("-excel", Arg.Set excel, "Also output an Excel-readable spreadsheet results.xls");
     ("-xml", Arg.Set excel, "Deprecated alias for -excel");
     ("-server", Arg.Set_string server, "Benchmark server endpoint HOST:PORT");
+    ( "-server-benchmark-root",
+      Arg.String (fun root -> server_benchmark_root := Some root),
+      "Server-visible root for relative benchmark entries" );
+    ( "-server-exe-root",
+      Arg.String (fun root -> server_exe_root := Some root),
+      "Server-visible root for relative solver commands" );
     ("-detach", Arg.Set detach, "Submit the batch and exit after server acceptance");
     ("-reconnect", Arg.String (fun id -> reconnect := Some id), "Reconnect to an existing server job id");
   ]
@@ -269,13 +294,13 @@ let () =
       if lines = [] then (
         prerr_endline "benchmark: benchmark file is empty";
         exit 2);
-      let cwd = Sys.getcwd () in
+      let server_benchmark_root, server_exe_root = require_server_roots benchmark_file in
       let request : Protocol.submit_request =
         {
-          cwd;
           benchmark_file;
-          benchmark_prefix = Filename.dirname benchmark_file;
           benchmark_name = Common.prune benchmark_file;
+          server_benchmark_root;
+          server_exe_root;
           lines;
           commands;
           timeout = !timeout;

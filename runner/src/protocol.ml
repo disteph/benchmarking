@@ -1,8 +1,8 @@
 type submit_request = {
-  cwd : string;
   benchmark_file : string;
-  benchmark_prefix : string;
   benchmark_name : string;
+  server_benchmark_root : string;
+  server_exe_root : string;
   lines : string list;
   commands : string list;
   timeout : int;
@@ -119,10 +119,10 @@ let submit_to_yojson r =
   `Assoc
     [
       ("type", `String "submit");
-      ("cwd", `String r.cwd);
       ("benchmark_file", `String r.benchmark_file);
-      ("benchmark_prefix", `String r.benchmark_prefix);
       ("benchmark_name", `String r.benchmark_name);
+      ("server_benchmark_root", `String r.server_benchmark_root);
+      ("server_exe_root", `String r.server_exe_root);
       ("lines", `List (List.map (fun s -> `String s) r.lines));
       ("commands", `List (List.map (fun s -> `String s) r.commands));
       ("timeout", `Int r.timeout);
@@ -140,10 +140,16 @@ let submit_of_yojson = function
   | `Assoc fields ->
       if as_string (member "type" fields) <> "submit" then invalid_arg "expected submit";
       {
-        cwd = as_string (member "cwd" fields);
         benchmark_file = as_string (member "benchmark_file" fields);
-        benchmark_prefix = as_string (member "benchmark_prefix" fields);
         benchmark_name = as_string (member "benchmark_name" fields);
+        server_benchmark_root =
+          (match List.assoc_opt "server_benchmark_root" fields with
+          | Some value -> as_string value
+          | None -> as_string (member "benchmark_prefix" fields));
+        server_exe_root =
+          (match List.assoc_opt "server_exe_root" fields with
+          | Some value -> as_string value
+          | None -> as_string (member "cwd" fields));
         lines = as_string_list (member "lines" fields);
         commands = as_string_list (member "commands" fields);
         timeout = as_int (member "timeout" fields);
