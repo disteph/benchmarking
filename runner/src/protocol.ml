@@ -13,8 +13,20 @@ type submit_request = {
   detach : bool;
 }
 
+type request =
+  | Submit of submit_request
+  | Reconnect of { batch_id : string }
+
 type event =
-  | Accepted of { batch_id : string; output_dir : string; total_jobs : int }
+  | Accepted of {
+      batch_id : string;
+      output_dir : string;
+      total_jobs : int;
+      completed : int;
+      prior_jobs : int;
+      prior_completed : int;
+    }
+  | Queue_progress of { batch_id : string; completed : int; total : int }
   | Job_finished of {
       batch_id : string;
       completed : int;
@@ -70,6 +82,9 @@ let submit_to_yojson r =
       ("detach", `Bool r.detach);
     ]
 
+let reconnect_to_yojson batch_id =
+  `Assoc [ ("type", `String "reconnect"); ("batch_id", `String batch_id) ]
+
 let submit_of_yojson = function
   | `Assoc fields ->
       if as_string (member "type" fields) <> "submit" then invalid_arg "expected submit";
@@ -89,14 +104,37 @@ let submit_of_yojson = function
       }
   | _ -> invalid_arg "expected JSON object"
 
+let request_to_yojson = function
+  | Submit request -> submit_to_yojson request
+  | Reconnect { batch_id } -> reconnect_to_yojson batch_id
+
+let request_of_yojson = function
+  | `Assoc fields as json -> (
+      match as_string (member "type" fields) with
+      | "submit" -> Submit (submit_of_yojson json)
+      | "reconnect" -> Reconnect { batch_id = as_string (member "batch_id" fields) }
+      | request_type -> invalid_arg ("unknown request: " ^ request_type))
+  | _ -> invalid_arg "expected JSON object"
+
 let event_to_yojson = function
-  | Accepted { batch_id; output_dir; total_jobs } ->
+  | Accepted { batch_id; output_dir; total_jobs; completed; prior_jobs; prior_completed } ->
       `Assoc
         [
           ("event", `String "accepted");
           ("batch_id", `String batch_id);
           ("output_dir", `String output_dir);
           ("total_jobs", `Int total_jobs);
+          ("completed", `Int completed);
+          ("prior_jobs", `Int prior_jobs);
+          ("prior_completed", `Int prior_completed);
+        ]
+  | Queue_progress { batch_id; completed; total } ->
+      `Assoc
+        [
+          ("event", `String "queue_progress");
+          ("batch_id", `String batch_id);
+          ("completed", `Int completed);
+          ("total", `Int total);
         ]
   | Job_finished { batch_id; completed; total; solver; benchmark; result } ->
       `Assoc
@@ -133,6 +171,25 @@ let event_of_yojson = function
               batch_id = as_string (member "batch_id" fields);
               output_dir = as_string (member "output_dir" fields);
               total_jobs = as_int (member "total_jobs" fields);
+              completed =
+                (match List.assoc_opt "completed" fields with
+                | Some value -> as_int value
+                | None -> 0);
+              prior_jobs =
+                (match List.assoc_opt "prior_jobs" fields with
+                | Some value -> as_int value
+                | None -> 0);
+              prior_completed =
+                (match List.assoc_opt "prior_completed" fields with
+                | Some value -> as_int value
+                | None -> 0);
+            }
+      | "queue_progress" ->
+          Queue_progress
+            {
+              batch_id = as_string (member "batch_id" fields);
+              completed = as_int (member "completed" fields);
+              total = as_int (member "total" fields);
             }
       | "job_finished" ->
           Job_finished
@@ -159,7 +216,12 @@ let event_of_yojson = function
       | event -> invalid_arg ("unknown event: " ^ event))
   | _ -> invalid_arg "expected JSON object"
 
-let encode_submit r = Yojson.Safe.to_string (submit_to_yojson r)
-let decode_submit s = Yojson.Safe.from_string s |> submit_of_yojson
+let encode_request r = Yojson.Safe.to_string (request_to_yojson r)
+let decode_request s = Yojson.Safe.from_string s |> request_of_yojson
+let encode_submit r = encode_request (Submit r)
+let decode_submit s =
+  match decode_request s with
+  | Submit r -> r
+  | Reconnect _ -> invalid_arg "expected submit"
 let encode_event e = Yojson.Safe.to_string (event_to_yojson e)
 let decode_event s = Yojson.Safe.from_string s |> event_of_yojson

@@ -10,17 +10,25 @@ type job = {
 }
 
 and batch = {
+  sequence : int;
   id : string;
   request : Protocol.submit_request;
   out_dir : string;
   htbl : (int * Common.aggregate) Common.HStrings.t Common.HStrings.t;
   log : string Stream.t;
   log_done : bool ref;
-  events : Protocol.event Stream.t option;
+  watchers : Protocol.event Stream.t list ref;
   total_jobs : int;
+  prior_jobs : int;
+  mutable prior_completed : int;
   mutable completed : int;
-  mutable failed : bool;
+  mutable status : batch_status;
 }
+
+and batch_status =
+  | Running
+  | Finished
+  | Failed of string
 
 type state = {
   cores : int;
@@ -30,6 +38,7 @@ type state = {
   mutable pending : job list;
   mutable running : int;
   mutable reserved_memory : int;
+  batches : (string, batch) Hashtbl.t;
   wake_scheduler : Eio.Condition.t;
   log_server : string -> unit;
 }
@@ -41,10 +50,49 @@ let send_line writer line =
 
 let send_event writer event = send_line writer (Protocol.encode_event event)
 
+let accepted_event batch =
+  Accepted
+    {
+      batch_id = batch.id;
+      output_dir = batch.out_dir;
+      total_jobs = batch.total_jobs;
+      completed = batch.completed;
+      prior_jobs = batch.prior_jobs;
+      prior_completed = batch.prior_completed;
+    }
+
+let add_watcher batch =
+  let events = Stream.create max_int in
+  batch.watchers := events :: !(batch.watchers);
+  events
+
+let remove_watcher batch events =
+  batch.watchers := List.filter (fun existing -> existing != events) !(batch.watchers)
+
 let publish batch event =
-  match batch.events with
-  | None -> ()
-  | Some events -> Stream.add events event
+  List.iter (fun events -> Stream.add events event) !(batch.watchers)
+
+let unfinished_jobs batch =
+  match batch.status with
+  | Running -> max 0 (batch.total_jobs - batch.completed)
+  | Finished | Failed _ -> 0
+
+let prior_jobs state =
+  Hashtbl.fold (fun _ batch total -> total + unfinished_jobs batch) state.batches 0
+
+let publish_prior_progress state finished_batch =
+  Hashtbl.iter
+    (fun _ batch ->
+      if batch.sequence > finished_batch.sequence && batch.prior_completed < batch.prior_jobs then (
+        batch.prior_completed <- min batch.prior_jobs (batch.prior_completed + 1);
+        publish batch
+          (Queue_progress
+             {
+               batch_id = batch.id;
+               completed = batch.prior_completed;
+               total = batch.prior_jobs;
+             })))
+    state.batches
 
 let server_addr host port =
   let ip =
@@ -84,19 +132,22 @@ let take_runnable state =
 let result_sort batch = Common.sort_of_name batch.request.sort
 
 let finish_batch state batch =
-  if not batch.failed then (
+  match batch.status with
+  | Failed _ | Finished -> ()
+  | Running -> (
     try
       Common.hashtables_to_files_native batch.out_dir batch.htbl (result_sort batch);
       if batch.request.excel then
         Common.hashtables_to_excel_native batch.out_dir batch.htbl Common.cmp_user;
       batch.log_done := true;
       Stream.add batch.log "";
+      batch.status <- Finished;
       publish batch (Batch_finished { batch_id = batch.id; output_dir = batch.out_dir });
       state.log_server
         (Format.sprintf "batch %s finished in %s" batch.id batch.out_dir)
     with exn ->
-      batch.failed <- true;
       let message = Printexc.to_string exn in
+      batch.status <- Failed message;
       publish batch (Batch_failed { batch_id = batch.id; message });
       state.log_server (Format.sprintf "batch %s failed: %s" batch.id message))
 
@@ -113,6 +164,7 @@ let run_job proc_mgr state job =
   Common.add_result ~htbl:batch.htbl ~nb_benchmarks:(List.length request.lines) solver_name
     job.benchmark result;
   batch.completed <- batch.completed + 1;
+  publish_prior_progress state batch;
   publish batch
     (Job_finished
        {
@@ -155,31 +207,37 @@ let validate_request state (request : Protocol.submit_request) =
              "per-job memory limit %i exceeds server -max-memory %i" memory max_memory)
     | _ -> Ok ()
 
-let create_batch state (request : Protocol.submit_request) events =
-  let id =
+let create_batch state (request : Protocol.submit_request) =
+  let sequence =
     state.next_batch <- state.next_batch + 1;
-    Format.sprintf "batch-%06d" state.next_batch
+    state.next_batch
   in
+  let id = Format.sprintf "batch-%06d" sequence in
   let digest =
     Common.digest ~benchmark_file:request.benchmark_name ~lines:request.lines
       ~timeout:request.timeout ?memory:request.memory ()
   in
   let out_dir = Common.fresh_dir_native ~root:state.output_root ~dir:digest in
   let total_jobs = List.length request.lines * List.length request.commands * request.generations in
+  let prior_jobs = prior_jobs state in
   let batch =
     {
+      sequence;
       id;
       request;
       out_dir;
       htbl = Common.HStrings.create (List.length request.commands);
       log = Stream.create max_int;
       log_done = ref false;
-      events;
+      watchers = ref [];
       total_jobs;
+      prior_jobs;
+      prior_completed = 0;
       completed = 0;
-      failed = false;
+      status = Running;
     }
   in
+  Hashtbl.add state.batches id batch;
   (batch, total_jobs)
 
 let enqueue_jobs state batch =
@@ -215,39 +273,62 @@ let handle_submit state sw request =
   match validate_request state request with
   | Error message -> Error message
   | Ok () ->
-      let events = if request.detach then None else Some (Stream.create max_int) in
-      let batch, total_jobs = create_batch state request events in
+      let batch, total_jobs = create_batch state request in
+      let events = if request.detach then None else Some (add_watcher batch) in
       start_log_drain sw batch;
       enqueue_jobs state batch;
       state.log_server
         (Format.sprintf "accepted %s with %i jobs into %s" batch.id total_jobs batch.out_dir);
-      Ok (batch, Accepted { batch_id = batch.id; output_dir = batch.out_dir; total_jobs })
+      Ok (batch, events)
+
+let rec drain_events writer events =
+  let event = Stream.take events in
+  send_event writer event;
+  match event with
+  | Batch_finished _ | Batch_failed _ -> ()
+  | _ -> drain_events writer events
+
+let watch_stream writer batch events =
+  Fun.protect
+    ~finally:(fun () -> remove_watcher batch events)
+    (fun () ->
+      send_event writer (accepted_event batch);
+      match batch.status with
+      | Running -> drain_events writer events
+      | Finished ->
+          send_event writer
+            (Batch_finished { batch_id = batch.id; output_dir = batch.out_dir })
+      | Failed message -> send_event writer (Batch_failed { batch_id = batch.id; message }))
+
+let watch_batch writer batch =
+  let events = add_watcher batch in
+  watch_stream writer batch events
 
 let handle_client state sw flow _addr =
   let reader = Buf_read.of_flow flow ~max_size:16_000_000 in
   let request =
-    try Buf_read.line reader |> Protocol.decode_submit
+    try Buf_read.line reader |> Protocol.decode_request
     with exn ->
-      invalid_arg ("invalid submit request: " ^ Printexc.to_string exn)
+      invalid_arg ("invalid request: " ^ Printexc.to_string exn)
   in
   Buf_write.with_flow flow @@ fun writer ->
-  match handle_submit state sw request with
-  | Error message ->
-      send_event writer (Batch_failed { batch_id = ""; message })
-  | Ok (batch, accepted) ->
-      send_event writer accepted;
-      if not request.detach then (
-        let rec loop () =
-          match batch.events with
-          | None -> ()
-          | Some events -> (
-              let event = Stream.take events in
-              send_event writer event;
-              match event with
-              | Batch_finished _ | Batch_failed _ -> ()
-              | _ -> loop ())
-        in
-        loop ())
+  match request with
+  | Submit submit_request -> (
+      match handle_submit state sw submit_request with
+      | Error message -> send_event writer (Batch_failed { batch_id = ""; message })
+      | Ok (batch, events) ->
+          if submit_request.detach then send_event writer (accepted_event batch)
+          else
+            match events with
+            | None -> assert false
+            | Some events -> watch_stream writer batch events)
+  | Reconnect { batch_id } -> (
+      match Hashtbl.find_opt state.batches batch_id with
+      | None ->
+          send_event writer
+            (Batch_failed
+               { batch_id; message = "unknown job id; queued jobs are only kept in server memory" })
+      | Some batch -> watch_batch writer batch)
 
 let parse_positive name value =
   if value < 1 then (
@@ -303,6 +384,7 @@ let () =
       pending = [];
       running = 0;
       reserved_memory = 0;
+      batches = Hashtbl.create 64;
       wake_scheduler = Eio.Condition.create ();
       log_server;
     }
