@@ -15,6 +15,8 @@ yicesqs_dir="$dir/yicesQS"
 export LD_LIBRARY_PATH=$dir/install/lib:/usr/local/lib
 export LDFLAGS="-L/space-1/yices/sgl_exp/lib/lib"
 
+mkdir -p "$dir/install"
+
 # descend into correct directory to get git tagging
 case $option in
     qs)
@@ -27,7 +29,7 @@ esac
 
 # Constructing a tag for version found in that directory
 
-status=$( git status -s | grep "M " )
+status=$( git status -s | grep "M " || true )
 
 if [ -z "$status" ]
 then
