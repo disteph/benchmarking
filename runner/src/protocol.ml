@@ -16,6 +16,7 @@ type submit_request = {
 type request =
   | Submit of submit_request
   | Reconnect of { batch_id : string }
+  | Kill of { batch_id : string }
 
 type event =
   | Accepted of {
@@ -38,6 +39,7 @@ type event =
   | Output_file of { batch_id : string; name : string; contents : string }
   | Batch_finished of { batch_id : string; output_dir : string }
   | Batch_failed of { batch_id : string; message : string }
+  | Batch_killed of { batch_id : string; message : string }
 
 let base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
@@ -136,6 +138,9 @@ let submit_to_yojson r =
 let reconnect_to_yojson batch_id =
   `Assoc [ ("type", `String "reconnect"); ("batch_id", `String batch_id) ]
 
+let kill_to_yojson batch_id =
+  `Assoc [ ("type", `String "kill"); ("batch_id", `String batch_id) ]
+
 let submit_of_yojson = function
   | `Assoc fields ->
       if as_string (member "type" fields) <> "submit" then invalid_arg "expected submit";
@@ -164,12 +169,14 @@ let submit_of_yojson = function
 let request_to_yojson = function
   | Submit request -> submit_to_yojson request
   | Reconnect { batch_id } -> reconnect_to_yojson batch_id
+  | Kill { batch_id } -> kill_to_yojson batch_id
 
 let request_of_yojson = function
   | `Assoc fields as json -> (
       match as_string (member "type" fields) with
       | "submit" -> Submit (submit_of_yojson json)
       | "reconnect" -> Reconnect { batch_id = as_string (member "batch_id" fields) }
+      | "kill" -> Kill { batch_id = as_string (member "batch_id" fields) }
       | request_type -> invalid_arg ("unknown request: " ^ request_type))
   | _ -> invalid_arg "expected JSON object"
 
@@ -223,6 +230,13 @@ let event_to_yojson = function
       `Assoc
         [
           ("event", `String "batch_failed");
+          ("batch_id", `String batch_id);
+          ("message", `String message);
+        ]
+  | Batch_killed { batch_id; message } ->
+      `Assoc
+        [
+          ("event", `String "batch_killed");
           ("batch_id", `String batch_id);
           ("message", `String message);
         ]
@@ -285,6 +299,12 @@ let event_of_yojson = function
               batch_id = as_string (member "batch_id" fields);
               message = as_string (member "message" fields);
             }
+      | "batch_killed" ->
+          Batch_killed
+            {
+              batch_id = as_string (member "batch_id" fields);
+              message = as_string (member "message" fields);
+            }
       | event -> invalid_arg ("unknown event: " ^ event))
   | _ -> invalid_arg "expected JSON object"
 
@@ -294,6 +314,6 @@ let encode_submit r = encode_request (Submit r)
 let decode_submit s =
   match decode_request s with
   | Submit r -> r
-  | Reconnect _ -> invalid_arg "expected submit"
+  | Reconnect _ | Kill _ -> invalid_arg "expected submit"
 let encode_event e = Yojson.Safe.to_string (event_to_yojson e)
 let decode_event s = Yojson.Safe.from_string s |> event_of_yojson

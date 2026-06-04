@@ -20,6 +20,7 @@ and batch = {
   log_drained : Eio.Condition.t;
   mutable log_closed : bool;
   watchers : Protocol.event Stream.t list ref;
+  running_switches : Switch.t list ref;
   total_jobs : int;
   prior_jobs : int;
   mutable prior_completed : int;
@@ -31,6 +32,7 @@ and batch_status =
   | Running
   | Finished
   | Failed of string
+  | Killed of string
 
 type state = {
   cores : int;
@@ -101,7 +103,7 @@ let send_output_files writer batch =
 let unfinished_jobs batch =
   match batch.status with
   | Running -> max 0 (batch.total_jobs - batch.completed)
-  | Finished | Failed _ -> 0
+  | Finished | Failed _ | Killed _ -> 0
 
 let prior_jobs state =
   Hashtbl.fold (fun _ batch total -> total + unfinished_jobs batch) state.batches 0
@@ -159,7 +161,7 @@ let result_sort batch = Common.sort_of_name batch.request.sort
 
 let finish_batch state batch =
   match batch.status with
-  | Failed _ | Finished -> ()
+  | Failed _ | Finished | Killed _ -> ()
   | Running -> (
     try
       Common.hashtables_to_files_native batch.out_dir batch.htbl (result_sort batch);
@@ -186,36 +188,51 @@ let run_job proc_mgr state job =
   let request = batch.request in
   let solver = Common.solver_path ~root:request.server_exe_root job.solver in
   let instance = Common.benchmark_path ~root:request.server_benchmark_root job.benchmark in
-  let result =
-    Common.with_timing proc_mgr ~timeout:request.timeout ?memory:request.memory
-      ~log:batch.log [ solver; instance ]
-  in
-  let solver_name = Common.prune job.solver in
-  Common.add_result ~htbl:batch.htbl ~nb_benchmarks:(List.length request.lines) solver_name
-    job.benchmark result;
-  batch.completed <- batch.completed + 1;
-  publish_prior_progress state batch;
-  publish batch
-    (Job_finished
-       {
-         batch_id = batch.id;
-         completed = batch.completed;
-         total = batch.total_jobs;
-         solver = solver_name;
-         benchmark = job.benchmark;
-         result = Common.output_to_string result;
-       });
-  state.running <- state.running - 1;
-  state.reserved_memory <- state.reserved_memory - job.reserve_memory;
-  if batch.completed = batch.total_jobs then finish_batch state batch;
-  Eio.Condition.broadcast state.wake_scheduler
+  Fun.protect
+    ~finally:(fun () ->
+      state.running <- state.running - 1;
+      state.reserved_memory <- state.reserved_memory - job.reserve_memory;
+      Eio.Condition.broadcast state.wake_scheduler)
+    (fun () ->
+      let result =
+        Common.with_timing proc_mgr ~timeout:request.timeout ?memory:request.memory
+          ~log:batch.log [ solver; instance ]
+      in
+      match batch.status with
+      | Running ->
+          let solver_name = Common.prune job.solver in
+          Common.add_result ~htbl:batch.htbl ~nb_benchmarks:(List.length request.lines)
+            solver_name job.benchmark result;
+          batch.completed <- batch.completed + 1;
+          publish_prior_progress state batch;
+          publish batch
+            (Job_finished
+               {
+                 batch_id = batch.id;
+                 completed = batch.completed;
+                 total = batch.total_jobs;
+                 solver = solver_name;
+                 benchmark = job.benchmark;
+                 result = Common.output_to_string result;
+               });
+          if batch.completed = batch.total_jobs then finish_batch state batch
+      | Finished | Failed _ | Killed _ -> ())
 
 let rec scheduler proc_mgr state sw =
   match take_runnable state with
   | Some job ->
       state.running <- state.running + 1;
       state.reserved_memory <- state.reserved_memory + job.reserve_memory;
-      Fiber.fork ~sw (fun () -> run_job proc_mgr state job);
+      Fiber.fork ~sw (fun () ->
+          try
+            Switch.run ~name:("job " ^ job.batch.id) @@ fun job_sw ->
+            job.batch.running_switches := job_sw :: !(job.batch.running_switches);
+            Fun.protect
+              ~finally:(fun () ->
+                job.batch.running_switches :=
+                  List.filter (fun existing -> existing != job_sw) !(job.batch.running_switches))
+              (fun () -> run_job proc_mgr state job)
+          with _ -> ());
       scheduler proc_mgr state sw
   | None ->
       Eio.Condition.await_no_mutex state.wake_scheduler;
@@ -262,6 +279,7 @@ let create_batch state (request : Protocol.submit_request) =
       log_drained = Eio.Condition.create ();
       log_closed = false;
       watchers = ref [];
+      running_switches = ref [];
       total_jobs;
       prior_jobs;
       prior_completed = 0;
@@ -287,6 +305,41 @@ let enqueue_jobs state batch =
   in
   state.pending <- state.pending @ new_jobs;
   Eio.Condition.broadcast state.wake_scheduler
+
+let kill_batch state batch_id =
+  match Hashtbl.find_opt state.batches batch_id with
+  | None ->
+      Batch_failed { batch_id; message = "unknown job id; queued jobs are only kept in server memory" }
+  | Some batch -> (
+      match batch.status with
+      | Finished ->
+          Batch_failed { batch_id; message = "batch already finished" }
+      | Failed message ->
+          Batch_failed { batch_id; message = "batch already failed: " ^ message }
+      | Killed message ->
+          Batch_killed { batch_id; message }
+      | Running ->
+          let removed = ref 0 in
+          state.pending <-
+            List.filter
+              (fun job ->
+                if job.batch == batch then (
+                  incr removed;
+                  false)
+                else true)
+              state.pending;
+          let running = List.length !(batch.running_switches) in
+          let message =
+            Format.sprintf "removed %d pending jobs and cancelled %d running jobs" !removed running
+          in
+          batch.status <- Killed message;
+          List.iter
+            (fun sw -> Switch.fail sw (Failure ("killed " ^ batch_id)))
+            !(batch.running_switches);
+          publish batch (Batch_killed { batch_id; message });
+          Eio.Condition.broadcast state.wake_scheduler;
+          state.log_server (Format.sprintf "killed %s: %s" batch_id message);
+          Batch_killed { batch_id; message })
 
 let start_log_drain sw batch =
   Fiber.fork_daemon ~sw (fun () ->
@@ -321,7 +374,7 @@ let rec drain_events writer events =
   let event = Stream.take events in
   send_event writer event;
   match event with
-  | Batch_finished _ | Batch_failed _ -> ()
+  | Batch_finished _ | Batch_failed _ | Batch_killed _ -> ()
   | _ -> drain_events writer events
 
 let watch_stream writer batch events =
@@ -335,14 +388,15 @@ let watch_stream writer batch events =
           send_output_files writer batch;
           send_event writer
             (Batch_finished { batch_id = batch.id; output_dir = batch.out_dir })
-      | Failed message -> send_event writer (Batch_failed { batch_id = batch.id; message }))
+      | Failed message -> send_event writer (Batch_failed { batch_id = batch.id; message })
+      | Killed message -> send_event writer (Batch_killed { batch_id = batch.id; message }))
 
 let watch_batch writer batch =
   let events = add_watcher batch in
   watch_stream writer batch events
 
 let handle_client state sw flow _addr =
-  let reader = Buf_read.of_flow flow ~max_size:16_000_000 in
+  let reader = Buf_read.of_flow flow ~max_size:Protocol_limits.max_json_line_size in
   let request =
     try Buf_read.line reader |> Protocol.decode_request
     with exn ->
@@ -366,6 +420,7 @@ let handle_client state sw flow _addr =
             (Batch_failed
                { batch_id; message = "unknown job id; queued jobs are only kept in server memory" })
       | Some batch -> watch_batch writer batch)
+  | Kill { batch_id } -> send_event writer (kill_batch state batch_id)
 
 let parse_positive name value =
   if value < 1 then (

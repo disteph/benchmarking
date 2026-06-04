@@ -39,6 +39,7 @@ let test_submit_roundtrip () =
       assert_int "generations" submit_request.generations r.generations;
       assert_bool "excel" r.excel
   | Reconnect _ -> fail "decoded submit as reconnect"
+  | Kill _ -> fail "decoded submit as kill"
 
 let test_reconnect_roundtrip () =
   match
@@ -46,7 +47,14 @@ let test_reconnect_roundtrip () =
     |> Protocol.decode_request
   with
   | Reconnect { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
+  | Kill _ -> fail "decoded reconnect as kill"
   | Submit _ -> fail "decoded reconnect as submit"
+
+let test_kill_roundtrip () =
+  match Protocol.encode_request (Kill { batch_id = "batch-000123" }) |> Protocol.decode_request with
+  | Kill { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
+  | Submit _ -> fail "decoded kill as submit"
+  | Reconnect _ -> fail "decoded kill as reconnect"
 
 let test_event_roundtrip () =
   let events =
@@ -73,6 +81,7 @@ let test_event_roundtrip () =
       Output_file { batch_id = "batch-1"; name = "solver.csv"; contents = "YWJj" };
       Batch_finished { batch_id = "batch-1"; output_dir = "/server/out" };
       Batch_failed { batch_id = "batch-1"; message = "failed" };
+      Batch_killed { batch_id = "batch-1"; message = "killed" };
     ]
   in
   List.iter
@@ -122,6 +131,7 @@ let test_result_file_names () =
 let () =
   test_submit_roundtrip ();
   test_reconnect_roundtrip ();
+  test_kill_roundtrip ();
   test_event_roundtrip ();
   test_base64_roundtrip ();
   test_fresh_output_dirs ();

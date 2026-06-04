@@ -2,7 +2,7 @@
  (name runner_lib)
  (libraries containers eio timer yojson unix)
  (preprocess (pps ppx_deriving.std))
- (modules common protocol excel)
+ (modules common protocol excel protocol_limits)
 )
 
 (executable

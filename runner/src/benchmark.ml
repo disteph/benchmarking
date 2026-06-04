@@ -11,6 +11,7 @@ let detach = ref false
 let server = ref (Sys.getenv_opt "BENCHMARK_SERVER" |> Option.value ~default:"127.0.0.1:8765")
 let cores_was_used = ref None
 let reconnect = ref None
+let kill = ref None
 let server_benchmark_root = ref None
 let server_exe_root = ref None
 
@@ -105,6 +106,8 @@ let print_event = function
   | Protocol.Batch_failed { batch_id; message } ->
       let prefix = if batch_id = "" then "batch failed" else "batch " ^ batch_id ^ " failed" in
       Printf.eprintf "%s: %s\n%!" prefix message
+  | Protocol.Batch_killed { batch_id; message } ->
+      Printf.printf "killed %s: %s\n%!" batch_id message
 
 let progress_section ?bar_width ~color ~label total =
   let open Progress in
@@ -140,6 +143,8 @@ let print_final_event = function
   | Protocol.Batch_failed { batch_id; message } ->
       let prefix = if batch_id = "" then "batch failed" else "batch " ^ batch_id ^ " failed" in
       Printf.eprintf "%s: %s\n%!" prefix message
+  | Protocol.Batch_killed { batch_id; message } ->
+      Printf.printf "killed %s: %s\n%!" batch_id message
   | event -> print_event event
 
 let ensure_local_output_dir local_output_dir server_output_dir =
@@ -201,6 +206,7 @@ let wait_with_progress reader ~local_output_dir ~initial_prior_completed ~prior_
           apply_completed update_progress total;
           (0, event)
       | Protocol.Batch_failed _ -> (1, event)
+      | Protocol.Batch_killed _ -> (0, event)
       | Protocol.Accepted
           {
             completed = new_completed;
@@ -223,7 +229,7 @@ let submit ~detach_after_accept request =
   let host, port = parse_server !server in
   Eio_main.run @@ fun env ->
   Eio.Net.with_tcp_connect ~host ~service:(string_of_int port) (Stdenv.net env) @@ fun flow ->
-  let reader = Buf_read.of_flow flow ~max_size:1_000_000 in
+  let reader = Buf_read.of_flow flow ~max_size:Protocol_limits.max_json_line_size in
   Buf_write.with_flow flow @@ fun writer ->
   send_line writer (Protocol.encode_request request);
   let first_event = Buf_read.line reader |> Protocol.decode_event in
@@ -240,6 +246,7 @@ let submit ~detach_after_accept request =
         ~prior_total:prior_jobs ~initial_completed:completed ~total:total_jobs
   | Protocol.Batch_finished _ -> 0
   | Protocol.Batch_failed _ -> 1
+  | Protocol.Batch_killed _ -> 0
   | Protocol.Job_finished { completed; total; _ } ->
       wait_with_progress reader ~local_output_dir ~initial_prior_completed:0 ~prior_total:0
         ~initial_completed:completed ~total
@@ -273,6 +280,7 @@ let options =
       "Server-visible root for relative solver commands" );
     ("-detach", Arg.Set detach, "Submit the batch and exit after server acceptance");
     ("-reconnect", Arg.String (fun id -> reconnect := Some id), "Reconnect to an existing server job id");
+    ("-kill", Arg.String (fun id -> kill := Some id), "Kill an existing server job id");
   ]
 
 let description =
@@ -282,13 +290,21 @@ let description =
 
 let () =
   Arg.parse options (fun a -> args := a :: !args) description;
-  match !reconnect, List.rev !args with
-  | Some batch_id, [] ->
+  match !reconnect, !kill, List.rev !args with
+  | Some _, Some _, _ ->
+      prerr_endline "benchmark: -reconnect and -kill are mutually exclusive";
+      exit 2
+  | Some batch_id, None, [] ->
       exit (submit ~detach_after_accept:false (Protocol.Reconnect { batch_id }))
-  | Some _, _ ->
+  | Some _, None, _ ->
       prerr_endline "benchmark: -reconnect does not take a benchmark file or solver command";
       exit 2
-  | None, benchmark_file :: commands ->
+  | None, Some batch_id, [] ->
+      exit (submit ~detach_after_accept:false (Protocol.Kill { batch_id }))
+  | None, Some _, _ ->
+      prerr_endline "benchmark: -kill does not take a benchmark file or solver command";
+      exit 2
+  | None, None, benchmark_file :: commands ->
       validate_input benchmark_file commands;
       let lines = CCIO.(with_in benchmark_file read_lines_l) in
       if lines = [] then (
@@ -312,5 +328,5 @@ let () =
         }
       in
       exit (submit ~detach_after_accept:!detach (Protocol.Submit request))
-  | None, _ ->
+  | None, None, _ ->
       Printf.printf "%s\n" (Arg.usage_string options "Usage: benchmark [options] BENCHMARK_FILE COMMAND...")
