@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 # directory of the script
 dir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
@@ -8,6 +10,7 @@ option=$1
 
 # yices2 directory
 yices2_dir="$dir/yices2"
+yicesqs_dir="$dir/yicesQS"
 
 export LD_LIBRARY_PATH=$dir/install/lib:/usr/local/lib
 export LDFLAGS="-L/space-1/yices/sgl_exp/lib/lib"
@@ -15,7 +18,7 @@ export LDFLAGS="-L/space-1/yices/sgl_exp/lib/lib"
 # descend into correct directory to get git tagging
 case $option in
     qs)
-        cd "$dir/yicesQS"
+        cd "$yicesqs_dir"
         ;;
     *)
 	cd "$yices2_dir"
@@ -48,6 +51,16 @@ opt=""
 prefix=""
 suffix=""
 
+make_wrapper() {
+    wrapper=$1
+    shift
+    {
+        echo "#!/bin/bash"
+        echo "exec \"$dir/install/$filename\" $* \"\$@\""
+    } > "$dir/install/$wrapper"
+    chmod a+x "$dir/install/$wrapper"
+}
+
 case $option in 
     debug)
         MODE=debug make
@@ -78,7 +91,11 @@ case $option in
     qs)
 	make
 	prefix="yicesQS-"
-	bin="$dir/yicesQS/_build/default/src/main.exe"
+	if [ -x "$yicesqs_dir/main.exe" ]; then
+	    bin="$yicesqs_dir/main.exe"
+	else
+	    bin="$yicesqs_dir/_build/default/src/main.exe"
+	fi
 	;;
     *)
 	make
@@ -100,9 +117,10 @@ case $option in
 	;;
     qs)
 	echo "Done with QS"
-	echo "#!/bin/bash
-$dir/install/$filename -under 10 $opt \$@" > "$dir/install/$filename-under10"
-        chmod a+x "$dir/install/$filename-under10"
+	make_wrapper "$filename-under20-mcsat" "-under 20 -mcsat"
+	make_wrapper "$filename-under20-cdclT" "-under 20 -cdclT"
+	make_wrapper "$filename-under20-cdclT-cadical" "-under 20 -cdclT -delegate cadical"
+	make_wrapper "$filename-under20-cdclT-cryptominisat" "-under 20 -cdclT -delegate cryptominisat"
 	;;
     *)
 	echo "#!/bin/bash
