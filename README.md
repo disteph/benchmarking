@@ -93,7 +93,8 @@ Common server options:
 The server keeps its queue, live batch table, and imported-folder table in
 memory. If the server exits, queued/running job state and batch ids are lost,
 although files already written on the server disk remain there. A completed
-CSV result folder can be imported later with `benchmark -reconnect FOLDER`.
+CSV result folder can be imported later with `benchmark -reconnect FOLDER` or
+`benchmark -download FOLDER`.
 
 ## Submitting A Batch
 
@@ -152,9 +153,9 @@ Client options:
 - `-reconnect JOB_ID_OR_FOLDER`
   Reconnect to an existing server-side batch id. If the id is unknown, the
   server treats the argument as a result folder to import.
-- `-download`
-  Only valid with `-reconnect`. Download output files when the reconnect
-  finishes. Plain reconnect does not download.
+- `-download JOB_ID_OR_FOLDER`
+  Reconnect to an existing server-side batch id or import a result folder, then
+  download output files when the reconnect finishes.
 - `-kill JOB_ID`
   Kill a queued or running batch.
 
@@ -177,7 +178,7 @@ Path inputs are interpreted as follows:
 | client `-server-exe-root DIR` | server | relative to the server process's current working directory |
 | benchmark entry inside `BENCHMARK_LIST` | server | relative to `-server-benchmark-root` |
 | solver command argument | server | relative to `-server-exe-root` |
-| `-reconnect FOLDER` folder import | server | relative to server `-output-root` |
+| `-reconnect FOLDER` / `-download FOLDER` folder import | server | relative to server `-output-root` |
 | downloaded result directory | client | when downloading, created in the client process's current working directory |
 
 The paths used for execution are server-side paths:
@@ -284,13 +285,13 @@ Reconnect behavior:
 - If the batch is already finished, the client receives the accepted and final
   events immediately.
 - Plain reconnect does not download files or create a local output directory.
-- Add `-download` to download files at the end of the reconnect.
+- Use `-download JOB_ID_OR_FOLDER` to reconnect and download files at the end.
 - If the id is unknown, the server tries to interpret the argument as a
   server-side result folder. If that also fails, reconnect fails clearly.
 
 Detached clients and killed clients do not receive output files at completion
 time, because there is no live TCP connection. Use `-reconnect JOB_ID` to view
-status, or `-reconnect JOB_ID -download` to download files, as long as the
+status, or `-download JOB_ID` to download files, as long as the
 server process is still alive.
 
 ### Reconnect By Batch Id
@@ -305,7 +306,7 @@ Use reconnect with download when you want a local copy of the server output
 files:
 
 ```sh
-benchmark -server 127.0.0.1:8765 -reconnect batch-000001 -download
+benchmark -server 127.0.0.1:8765 -download batch-000001
 ```
 
 The server tracks whether each connected client asked for downloads. A regular
@@ -314,8 +315,8 @@ Plain reconnect is a connection with download disabled.
 
 ### Reconnect By Result Folder
 
-If a batch id is unknown, `-reconnect` can import an existing server-side result
-folder:
+If a batch id is unknown, `-reconnect` and `-download` can import an existing
+server-side result folder:
 
 ```sh
 benchmark -server 127.0.0.1:8765 -reconnect QF_NRA5-123456-t300
@@ -334,15 +335,15 @@ Import behavior:
 - `results.xlsx` is generated or overwritten in that folder
 - a new finished batch id is created and printed
 - reconnecting to the same canonical folder reuses the same batch id
-- `-download` works during the folder reconnect or during a later reconnect to
-  the new batch id
+- `-download FOLDER` works during the folder reconnect, and
+  `-download JOB_ID` works during a later reconnect to the new batch id
 
 Examples:
 
 ```sh
 benchmark -server 127.0.0.1:8765 -reconnect QF_NRA5-123456-t300
-benchmark -server 127.0.0.1:8765 -reconnect QF_NRA5-123456-t300 -download
-benchmark -server 127.0.0.1:8765 -reconnect /srv/old-results/QF_NRA5 -download
+benchmark -server 127.0.0.1:8765 -download QF_NRA5-123456-t300
+benchmark -server 127.0.0.1:8765 -download /srv/old-results/QF_NRA5
 ```
 
 Folder import is intended for completed CSV data. It does not recover queued or
@@ -439,8 +440,8 @@ prints:
 downloaded output files to /path/to/local/output-dir
 ```
 
-Plain reconnect never downloads files. Reconnect with `-download` transfers the
-files into a fresh local directory.
+Plain reconnect never downloads files. `-download JOB_ID_OR_FOLDER` transfers
+the files into a fresh local directory.
 
 ## Result Classification
 
@@ -500,7 +501,7 @@ benchmark -server 127.0.0.1:8765 -reconnect batch-000001
 Reconnect later and download files:
 
 ```sh
-benchmark -server 127.0.0.1:8765 -reconnect batch-000001 -download
+benchmark -server 127.0.0.1:8765 -download batch-000001
 ```
 
 Import an existing server result folder without downloading:
@@ -512,7 +513,7 @@ benchmark -server 127.0.0.1:8765 -reconnect old-result-folder
 Import an existing server result folder and download:
 
 ```sh
-benchmark -server 127.0.0.1:8765 -reconnect /srv/bench-results/old-result-folder -download
+benchmark -server 127.0.0.1:8765 -download /srv/bench-results/old-result-folder
 ```
 
 Kill a running batch:

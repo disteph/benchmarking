@@ -12,7 +12,7 @@ let server = ref (Sys.getenv_opt "BENCHMARK_SERVER" |> Option.value ~default:"12
 let cores_was_used = ref None
 let reconnect = ref None
 let kill = ref None
-let download = ref false
+let download = ref None
 let server_benchmark_root = ref None
 let server_exe_root = ref None
 
@@ -284,7 +284,10 @@ let options =
     ( "-reconnect",
       Arg.String (fun id -> reconnect := Some id),
       "Reconnect to an existing server job id or import a server-side result folder" );
-    ("-download", Arg.Set download, "Download output files at the end of a reconnect");
+    ( "-download",
+      Arg.String (fun id -> download := Some id),
+      "Reconnect to an existing server job id or import a server-side result folder, then download \
+       output files" );
     ("-kill", Arg.String (fun id -> kill := Some id), "Kill an existing server job id");
   ]
 
@@ -295,26 +298,36 @@ let description =
 
 let () =
   Arg.parse options (fun a -> args := a :: !args) description;
-  if !download && Option.is_none !reconnect then (
-    prerr_endline "benchmark: -download only applies with -reconnect";
-    exit 2);
-  match !reconnect, !kill, List.rev !args with
-  | Some _, Some _, _ ->
+  match !reconnect, !download, !kill, List.rev !args with
+  | Some _, Some _, _, _ ->
+      prerr_endline "benchmark: -reconnect and -download are mutually exclusive";
+      exit 2
+  | Some _, None, Some _, _ ->
       prerr_endline "benchmark: -reconnect and -kill are mutually exclusive";
       exit 2
-  | Some batch_id, None, [] ->
+  | None, Some _, Some _, _ ->
+      prerr_endline "benchmark: -download and -kill are mutually exclusive";
+      exit 2
+  | Some batch_id, None, None, [] ->
       exit
-        (submit ~detach_after_accept:false ~download_outputs:!download
-           (Protocol.Reconnect { batch_id; download = !download }))
-  | Some _, None, _ ->
+        (submit ~detach_after_accept:false ~download_outputs:false
+           (Protocol.Reconnect { batch_id; download = false }))
+  | None, Some batch_id, None, [] ->
+      exit
+        (submit ~detach_after_accept:false ~download_outputs:true
+           (Protocol.Reconnect { batch_id; download = true }))
+  | Some _, None, None, _ ->
       prerr_endline "benchmark: -reconnect does not take a benchmark file or solver command";
       exit 2
-  | None, Some batch_id, [] ->
+  | None, Some _, None, _ ->
+      prerr_endline "benchmark: -download does not take a benchmark file or solver command";
+      exit 2
+  | None, None, Some batch_id, [] ->
       exit (submit ~detach_after_accept:false ~download_outputs:false (Protocol.Kill { batch_id }))
-  | None, Some _, _ ->
+  | None, None, Some _, _ ->
       prerr_endline "benchmark: -kill does not take a benchmark file or solver command";
       exit 2
-  | None, None, benchmark_file :: commands ->
+  | None, None, None, benchmark_file :: commands ->
       validate_input benchmark_file commands;
       let lines = CCIO.(with_in benchmark_file read_lines_l) in
       if lines = [] then (
@@ -340,5 +353,5 @@ let () =
       exit
         (submit ~detach_after_accept:!detach ~download_outputs:true
            (Protocol.Submit request))
-  | None, None, _ ->
+  | None, None, None, _ ->
       Printf.printf "%s\n" (Arg.usage_string options "Usage: benchmark [options] BENCHMARK_FILE COMMAND...")

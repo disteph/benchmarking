@@ -245,11 +245,14 @@ let test_client_cores_rejected ~client ~client_cwd list_path solver =
   assert_exit "client -cores rejection" 2 result;
   assert_bool "client -cores message" (contains ~needle:"-cores is now" result.output)
 
-let test_download_requires_reconnect ~client ~client_cwd ~port =
-  let result = run_client ~client ~client_cwd ~port [ "-download" ] in
-  assert_exit "client -download rejection" 2 result;
-  assert_bool "client -download message"
-    (contains ~needle:"-download only applies with -reconnect" result.output)
+let test_reconnect_download_conflict ~client ~client_cwd ~port =
+  let result =
+    run_client ~client ~client_cwd ~port
+      [ "-reconnect"; "batch-missing"; "-download"; "batch-missing" ]
+  in
+  assert_exit "client -reconnect/-download rejection" 2 result;
+  assert_bool "client -reconnect/-download message"
+    (contains ~needle:"-reconnect and -download are mutually exclusive" result.output)
 
 let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_root list_path
     solver =
@@ -272,7 +275,7 @@ let test_finished_batch_reconnect_modes ~client ~client_cwd ~port batch_id =
     (contains ~needle:("finished " ^ batch_id) reconnect.output);
   assert_bool "finished batch reconnect should not download"
     (not (contains ~needle:"downloaded output files to " reconnect.output));
-  let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
+  let download = run_client ~client ~client_cwd ~port [ "-download"; batch_id ] in
   assert_exit "finished batch reconnect with download" 0 download;
   let dir = download_dir_of_output download.output in
   assert_files_exact dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
@@ -291,7 +294,7 @@ let test_detach_and_reconnect ~client ~client_cwd ~port ~bench_root ~exe_root li
   assert_bool "plain reconnect should not download files"
     (not (contains ~needle:"downloaded output files to " reconnect.output));
   let reconnect_with_download =
-    run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ]
+    run_client ~client ~client_cwd ~port [ "-download"; batch_id ]
   in
   assert_exit "reconnect with download" 0 reconnect_with_download;
   let dir = download_dir_of_output reconnect_with_download.output in
@@ -485,7 +488,7 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
     (contains ~needle:"accepted job id batch-" import.output);
   assert_bool "folder reconnect should finish"
     (contains ~needle:"finished batch-" import.output);
-  assert_bool "folder reconnect without -download should not download"
+  assert_bool "folder reconnect without download should not download"
     (not (contains ~needle:"downloaded output files to " import.output));
   assert_bool "folder reconnect should produce results.xlsx on server"
     (Sys.file_exists (Filename.concat import_dir "results.xlsx"));
@@ -494,12 +497,12 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
   assert_exit "folder reconnect reuse" 0 same_folder;
   let reused_batch_id = batch_id_of_output same_folder.output in
   assert_bool "folder reconnect should reuse batch id" (String.equal batch_id reused_batch_id);
-  let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
+  let download = run_client ~client ~client_cwd ~port [ "-download"; batch_id ] in
   assert_exit "folder reconnect download by batch id" 0 download;
   let dir = download_dir_of_output download.output in
   assert_files_exact dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ];
   let direct_download =
-    run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs"; "-download" ]
+    run_client ~client ~client_cwd ~port [ "-download"; "imported-csvs" ]
   in
   assert_exit "folder reconnect direct download" 0 direct_download;
   let direct_batch_id = batch_id_of_output direct_download.output in
@@ -522,7 +525,7 @@ let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
   mkdir_p import_dir;
   write_file (Filename.concat import_dir "solver_abs.csv")
     "solver_abs\t\"abs-case.smt2\"\tsat\t7.000000\t8.000000\t9.000000\n";
-  let import = run_client ~client ~client_cwd ~port [ "-reconnect"; import_dir; "-download" ] in
+  let import = run_client ~client ~client_cwd ~port [ "-download"; import_dir ] in
   assert_exit "absolute folder reconnect import" 0 import;
   assert_bool "absolute folder reconnect should print accepted id"
     (contains ~needle:"accepted job id batch-" import.output);
@@ -600,7 +603,7 @@ let () =
     (fun () ->
       wait_for_server port;
       test_client_cores_rejected ~client ~client_cwd list_path sat_solver;
-      test_download_requires_reconnect ~client ~client_cwd ~port;
+      test_reconnect_download_conflict ~client ~client_cwd ~port;
       let first_batch_id, first_dir =
         test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root
           ~exe_root:solver_dir list_path "sat_solver.sh"
