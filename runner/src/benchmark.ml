@@ -271,7 +271,7 @@ let options =
       Arg.String parse_sort,
       "Sort output by increasing solve time, with argument \"wall\" or \"user\"" );
     ("-generations", Arg.Int (fun u -> generations := u), "Number of generations");
-    ("-excel", Arg.Set excel, "Also output an Excel-readable spreadsheet results.xls");
+    ("-excel", Arg.Set excel, "Also output an Excel spreadsheet results.xlsx");
     ("-xml", Arg.Set excel, "Deprecated alias for -excel");
     ("-server", Arg.Set_string server, "Benchmark server endpoint HOST:PORT");
     ( "-server-benchmark-root",

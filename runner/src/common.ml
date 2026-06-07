@@ -200,7 +200,7 @@ let result_file_names ~excel htbl =
     |> List.map (fun (command, _) -> safe_output_file_name (command ^ ".csv"))
     |> List.sort String.compare
   in
-  [ "log" ] @ csvs @ if excel then [ "results.xls" ] else []
+  [ "log" ] @ csvs @ if excel then [ "results.xlsx" ] else []
 
 let strip_suffix ~suffix s =
   let ls = String.length s in
@@ -454,18 +454,10 @@ let hashtables_to_excel_native ?(overwrite = false) out_path htbl sort =
            in
            { Excel.name = Format.sprintf "Sheet%i" (i + 1); rows })
   in
-  let filename = Filename.concat out_path "results.xls" in
-  let open_flags =
-    if overwrite then [ Open_wronly; Open_creat; Open_trunc ]
-    else [ Open_wronly; Open_creat; Open_excl ]
-  in
-  let ch = open_out_gen open_flags 0o640 filename in
-  Fun.protect
-    ~finally:(fun () -> close_out ch)
-    (fun () ->
-      let fmt = Format.formatter_of_out_channel ch in
-      Format.fprintf fmt "%a" Excel.pp_workbook (sheets, clashes);
-      Format.pp_print_flush fmt ())
+  let filename = Filename.concat out_path "results.xlsx" in
+  if (not overwrite) && Sys.file_exists filename then
+    invalid_arg ("output file already exists: " ^ filename);
+  Excel.write_workbook filename (sheets, clashes)
 
 let sort_of_name = function
   | "alpha" -> cmp_alpha

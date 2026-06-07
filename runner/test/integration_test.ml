@@ -93,6 +93,23 @@ let read_file path =
     ~finally:(fun () -> close_in ch)
     (fun () -> really_input_string ch (in_channel_length ch))
 
+let read_zip_entry path name =
+  let zf = Zip.open_in path in
+  Fun.protect
+    ~finally:(fun () -> Zip.close_in zf)
+    (fun () -> Zip.read_entry zf (Zip.find_entry zf name))
+
+let assert_zip_entries path expected =
+  let zf = Zip.open_in path in
+  Fun.protect
+    ~finally:(fun () -> Zip.close_in zf)
+    (fun () ->
+      let actual = Zip.entries zf |> List.map (fun entry -> entry.Zip.filename) |> List.sort String.compare in
+      if actual <> expected then
+        fail
+          (Printf.sprintf "unexpected entries in %s: expected [%s], got [%s]" path
+             (String.concat "; " expected) (String.concat "; " actual)))
+
 let readdir_names path =
   Sys.readdir path |> Array.to_list |> List.sort String.compare
 
@@ -244,7 +261,7 @@ let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_r
   assert_exit "normal submit" 0 result;
   assert_bool "accepted id printed" (contains ~needle:"accepted job id batch-" result.output);
   let dir = download_dir_of_output result.output in
-  assert_files_exact dir [ "log"; "results.xls"; "sat_solver.sh.csv" ];
+  assert_files_exact dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
   assert_csv_contains_sat dir "sat_solver.sh";
   (batch_id_of_output result.output, dir)
 
@@ -258,7 +275,7 @@ let test_finished_batch_reconnect_modes ~client ~client_cwd ~port batch_id =
   let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
   assert_exit "finished batch reconnect with download" 0 download;
   let dir = download_dir_of_output download.output in
-  assert_files_exact dir [ "log"; "results.xls"; "sat_solver.sh.csv" ];
+  assert_files_exact dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
   assert_csv_contains_sat dir "sat_solver.sh";
   dir
 
@@ -391,29 +408,47 @@ let test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_ro
   assert_exit "solver suffixes preserved" 0 result;
   let dir = download_dir_of_output result.output in
   assert_files_exact dir
-    [ "log"; "results.xls"; "same_stem.cdclT.csv"; "same_stem.mcsat.csv" ];
+    [ "log"; "results.xlsx"; "same_stem.cdclT.csv"; "same_stem.mcsat.csv" ];
   assert_csv_contains_sat dir "same_stem.mcsat";
   let cdclt_csv = read_file (Filename.concat dir "same_stem.cdclT.csv") in
   assert_bool "cdclT CSV should contain unsat result" (contains ~needle:"\tunsat" cdclt_csv);
-  let xls = read_file (Filename.concat dir "results.xls") in
-  assert_bool "results.xls should include mcsat suffix" (contains ~needle:"same_stem.mcsat" xls);
-  assert_bool "results.xls should include cdclT suffix" (contains ~needle:"same_stem.cdclT" xls);
-  assert_bool "results.xls should have Totals worksheet"
-    (contains ~needle:"<Worksheet ss:Name=\"Totals\">" xls);
-  assert_bool "results.xls should have Clashes worksheet"
-    (contains ~needle:"<Worksheet ss:Name=\"Clashes\">" xls);
-  assert_bool "results.xls should have first solver worksheet"
-    (contains ~needle:"<Worksheet ss:Name=\"Sheet1\">" xls);
-  assert_bool "results.xls should have second solver worksheet"
-    (contains ~needle:"<Worksheet ss:Name=\"Sheet2\">" xls);
-  assert_bool "results.xls should use whole result column in COUNTIF"
-    (contains ~needle:"=COUNTIF(Sheet1!C:C,&quot;unsat&quot;)" xls);
-  assert_bool "results.xls should use whole time column in SUMIF"
-    (contains ~needle:"=SUMIF(Sheet1!C:C,&quot;sat&quot;,Sheet1!E:E)" xls);
-  assert_bool "results.xls should not use old HTML header"
-    (not (contains ~needle:"<tr><th>Solver</th>" xls));
+  let xlsx_path = Filename.concat dir "results.xlsx" in
+  assert_zip_entries xlsx_path
+    [
+      "[Content_Types].xml";
+      "_rels/.rels";
+      "xl/_rels/workbook.xml.rels";
+      "xl/workbook.xml";
+      "xl/worksheets/sheet1.xml";
+      "xl/worksheets/sheet2.xml";
+      "xl/worksheets/sheet3.xml";
+      "xl/worksheets/sheet4.xml";
+    ];
+  let workbook = read_zip_entry xlsx_path "xl/workbook.xml" in
+  let totals = read_zip_entry xlsx_path "xl/worksheets/sheet1.xml" in
+  let clashes = read_zip_entry xlsx_path "xl/worksheets/sheet2.xml" in
+  let sheet3 = read_zip_entry xlsx_path "xl/worksheets/sheet3.xml" in
+  let sheet4 = read_zip_entry xlsx_path "xl/worksheets/sheet4.xml" in
+  assert_bool "results.xlsx should include mcsat suffix"
+    (contains ~needle:"same_stem.mcsat" sheet4);
+  assert_bool "results.xlsx should include cdclT suffix"
+    (contains ~needle:"same_stem.cdclT" sheet3);
+  assert_bool "results.xlsx should have Totals worksheet"
+    (contains ~needle:"<sheet name=\"Totals\"" workbook);
+  assert_bool "results.xlsx should have Clashes worksheet"
+    (contains ~needle:"<sheet name=\"Clashes\"" workbook);
+  assert_bool "results.xlsx should have first solver worksheet"
+    (contains ~needle:"<sheet name=\"Sheet1\"" workbook);
+  assert_bool "results.xlsx should have second solver worksheet"
+    (contains ~needle:"<sheet name=\"Sheet2\"" workbook);
+  assert_bool "results.xlsx should use whole result column in COUNTIF"
+    (contains ~needle:"COUNTIF(Sheet1!C:C,&quot;unsat&quot;)" totals);
+  assert_bool "results.xlsx should use whole time column in SUMIF"
+    (contains ~needle:"SUMIF(Sheet1!C:C,&quot;sat&quot;,Sheet1!E:E)" totals);
+  assert_bool "results.xlsx should not use old HTML header"
+    (not (contains ~needle:"<tr><th>Solver</th>" workbook));
   let worksheet_index name =
-    match index_of ~needle:("<Worksheet ss:Name=\"" ^ name ^ "\">") xls with
+    match index_of ~needle:("<sheet name=\"" ^ name ^ "\"") workbook with
     | Some i -> i
     | None -> fail ("missing worksheet " ^ name)
   in
@@ -424,16 +459,17 @@ let test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_ro
   assert_bool "Clashes header should list solver names"
     (contains
        ~needle:
-         "<Row><Cell><Data ss:Type=\"String\">Benchmark</Data></Cell><Cell><Data \
-          ss:Type=\"String\">same_stem.cdclT</Data></Cell><Cell><Data \
-          ss:Type=\"String\">same_stem.mcsat</Data></Cell></Row>"
-       xls);
+         "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>Benchmark</t></is></c><c \
+          r=\"B1\" t=\"inlineStr\"><is><t>same_stem.cdclT</t></is></c><c \
+          r=\"C1\" t=\"inlineStr\"><is><t>same_stem.mcsat</t></is></c></row>"
+       clashes);
   let clash_row =
-    "<Row><Cell><Data ss:Type=\"String\">suffix-case.smt2</Data></Cell><Cell><Data \
-     ss:Type=\"String\">unsat</Data></Cell><Cell><Data ss:Type=\"String\">sat</Data></Cell></Row>"
+    "<row r=\"2\"><c r=\"A2\" t=\"inlineStr\"><is><t>suffix-case.smt2</t></is></c><c \
+     r=\"B2\" t=\"inlineStr\"><is><t>unsat</t></is></c><c r=\"C2\" \
+     t=\"inlineStr\"><is><t>sat</t></is></c></row>"
   in
   assert_bool "Clashes worksheet should contain exactly one row for the clashing benchmark"
-    (count_occurrences ~needle:clash_row xls = 1)
+    (count_occurrences ~needle:clash_row clashes = 1)
 
 let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
   let import_dir = Filename.concat server_root "imported-csvs" in
@@ -451,8 +487,8 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
     (contains ~needle:"finished batch-" import.output);
   assert_bool "folder reconnect without -download should not download"
     (not (contains ~needle:"downloaded output files to " import.output));
-  assert_bool "folder reconnect should produce results.xls on server"
-    (Sys.file_exists (Filename.concat import_dir "results.xls"));
+  assert_bool "folder reconnect should produce results.xlsx on server"
+    (Sys.file_exists (Filename.concat import_dir "results.xlsx"));
   let batch_id = batch_id_of_output import.output in
   let same_folder = run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs" ] in
   assert_exit "folder reconnect reuse" 0 same_folder;
@@ -461,7 +497,7 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
   let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
   assert_exit "folder reconnect download by batch id" 0 download;
   let dir = download_dir_of_output download.output in
-  assert_files_exact dir [ "results.xls"; "solver_a.csv"; "solver_b.csv" ];
+  assert_files_exact dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ];
   let direct_download =
     run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs"; "-download" ]
   in
@@ -470,14 +506,16 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
   assert_bool "direct folder download should reuse batch id"
     (String.equal batch_id direct_batch_id);
   let direct_dir = download_dir_of_output direct_download.output in
-  assert_files_exact direct_dir [ "results.xls"; "solver_a.csv"; "solver_b.csv" ];
-  let xls = read_file (Filename.concat dir "results.xls") in
+  assert_files_exact direct_dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ];
+  let xlsx_path = Filename.concat dir "results.xlsx" in
+  let workbook = read_zip_entry xlsx_path "xl/workbook.xml" in
+  let clashes = read_zip_entry xlsx_path "xl/worksheets/sheet2.xml" in
   assert_bool "imported spreadsheet should have Totals worksheet"
-    (contains ~needle:"<Worksheet ss:Name=\"Totals\">" xls);
+    (contains ~needle:"<sheet name=\"Totals\"" workbook);
   assert_bool "imported spreadsheet should have Clashes worksheet"
-    (contains ~needle:"<Worksheet ss:Name=\"Clashes\">" xls);
+    (contains ~needle:"<sheet name=\"Clashes\"" workbook);
   assert_bool "imported spreadsheet should include clashing benchmark"
-    (contains ~needle:"case-1.smt2" xls)
+    (contains ~needle:"case-1.smt2" clashes)
 
 let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
   let import_dir = Filename.concat root "absolute-imported-csvs" in
@@ -489,7 +527,7 @@ let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
   assert_bool "absolute folder reconnect should print accepted id"
     (contains ~needle:"accepted job id batch-" import.output);
   let dir = download_dir_of_output import.output in
-  assert_files_exact dir [ "results.xls"; "solver_abs.csv" ];
+  assert_files_exact dir [ "results.xlsx"; "solver_abs.csv" ];
   assert_csv_contains_sat dir "solver_abs"
 
 let test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root =

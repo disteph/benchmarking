@@ -140,7 +140,7 @@ let test_result_file_names () =
   Common.HStrings.add htbl "solver-b" (Common.HStrings.create 1);
   Common.HStrings.add htbl "solver-a" (Common.HStrings.create 1);
   let names = Common.result_file_names ~excel:true htbl in
-  if names <> [ "log"; "solver-a.csv"; "solver-b.csv"; "results.xls" ] then
+  if names <> [ "log"; "solver-a.csv"; "solver-b.csv"; "results.xlsx" ] then
     fail "unexpected result file names"
 
 let () =

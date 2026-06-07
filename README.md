@@ -144,7 +144,7 @@ Client options:
 - `-generations N`
   Repeat each solver/benchmark job `N` times. Server mode requires `N >= 1`.
 - `-excel`
-  Also produce and transfer `results.xls`.
+  Also produce and transfer `results.xlsx`.
 - `-xml`
   Deprecated alias for `-excel`.
 - `-detach`
@@ -326,12 +326,12 @@ The folder argument is interpreted by the server:
 - a relative folder is resolved under server `-output-root`
 - an absolute folder is used as an absolute server-side path
 - the folder only needs to contain result CSV files
-- `log` and `results.xls` are optional
+- `log` and `results.xlsx` are optional
 
 Import behavior:
 
 - the server reads all `*.csv` files in the folder
-- `results.xls` is generated or overwritten in that folder
+- `results.xlsx` is generated or overwritten in that folder
 - a new finished batch id is created and printed
 - reconnecting to the same canonical folder reuses the same batch id
 - `-download` works during the folder reconnect or during a later reconnect to
@@ -366,7 +366,7 @@ For a batch with `S` solver commands, the server writes:
 
 - `log`
 - one `<solver>.csv` per solver
-- `results.xls` if `-excel` or `-xml` was used
+- `results.xlsx` if `-excel` or `-xml` was used
 
 So a normal server-produced batch produces:
 
@@ -374,7 +374,7 @@ So a normal server-produced batch produces:
 - `S + 2` files with Excel
 
 Imported result folders may contain only CSV files initially. During import,
-the server writes `results.xls` into the imported folder. If there is no `log`
+the server writes `results.xlsx` into the imported folder. If there is no `log`
 file in the imported folder, downloads from that imported batch omit `log`.
 
 The `log` file is a diagnostic execution log. It records the command and
@@ -414,11 +414,11 @@ not contain counting suffixes. They remain exactly:
 
 - `log`
 - `<solver>.csv`
-- `results.xls`
+- `results.xlsx`
 
 ## Spreadsheet Output
 
-`results.xls` is an Excel-readable SpreadsheetML workbook. It contains:
+`results.xlsx` is a standard Excel workbook. It contains:
 
 - `Totals` as the first tab, with formulas over whole columns of each solver tab
 - `Clashes` as the second tab, listing benchmarks where at least one solver says
