@@ -43,10 +43,20 @@ let test_submit_roundtrip () =
 
 let test_reconnect_roundtrip () =
   match
-    Protocol.encode_request (Reconnect { batch_id = "batch-000123" })
+    Protocol.encode_request (Reconnect { batch_id = "batch-000123"; download = true })
     |> Protocol.decode_request
   with
-  | Reconnect { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
+  | Reconnect { batch_id; download } ->
+      assert_equal "batch_id" "batch-000123" batch_id;
+      assert_bool "download" download
+  | Kill _ -> fail "decoded reconnect as kill"
+  | Submit _ -> fail "decoded reconnect as submit"
+
+let test_legacy_reconnect_defaults_no_download () =
+  match Protocol.decode_request {|{"type":"reconnect","batch_id":"batch-000123"}|} with
+  | Reconnect { batch_id; download } ->
+      assert_equal "batch_id" "batch-000123" batch_id;
+      assert_bool "download default" (not download)
   | Kill _ -> fail "decoded reconnect as kill"
   | Submit _ -> fail "decoded reconnect as submit"
 
@@ -120,6 +130,11 @@ let test_safe_output_file_names () =
   assert_raises "reject dotdot" (fun () -> ignore (Common.safe_output_file_name ".."));
   assert_raises "reject empty" (fun () -> ignore (Common.safe_output_file_name ""))
 
+let test_solver_output_name () =
+  assert_equal "relative solver suffix" "solver.mcsat" (Common.solver_output_name "solver.mcsat");
+  assert_equal "absolute solver suffix" "solver.cdclT"
+    (Common.solver_output_name "/tmp/install/solver.cdclT")
+
 let test_result_file_names () =
   let htbl = Common.HStrings.create 3 in
   Common.HStrings.add htbl "solver-b" (Common.HStrings.create 1);
@@ -131,10 +146,12 @@ let test_result_file_names () =
 let () =
   test_submit_roundtrip ();
   test_reconnect_roundtrip ();
+  test_legacy_reconnect_defaults_no_download ();
   test_kill_roundtrip ();
   test_event_roundtrip ();
   test_base64_roundtrip ();
   test_fresh_output_dirs ();
   test_safe_output_file_names ();
+  test_solver_output_name ();
   test_result_file_names ();
   print_endline "protocol/common tests passed"

@@ -15,7 +15,7 @@ type submit_request = {
 
 type request =
   | Submit of submit_request
-  | Reconnect of { batch_id : string }
+  | Reconnect of { batch_id : string; download : bool }
   | Kill of { batch_id : string }
 
 type event =
@@ -135,8 +135,13 @@ let submit_to_yojson r =
       ("detach", `Bool r.detach);
     ]
 
-let reconnect_to_yojson batch_id =
-  `Assoc [ ("type", `String "reconnect"); ("batch_id", `String batch_id) ]
+let reconnect_to_yojson batch_id download =
+  `Assoc
+    [
+      ("type", `String "reconnect");
+      ("batch_id", `String batch_id);
+      ("download", `Bool download);
+    ]
 
 let kill_to_yojson batch_id =
   `Assoc [ ("type", `String "kill"); ("batch_id", `String batch_id) ]
@@ -168,14 +173,22 @@ let submit_of_yojson = function
 
 let request_to_yojson = function
   | Submit request -> submit_to_yojson request
-  | Reconnect { batch_id } -> reconnect_to_yojson batch_id
+  | Reconnect { batch_id; download } -> reconnect_to_yojson batch_id download
   | Kill { batch_id } -> kill_to_yojson batch_id
 
 let request_of_yojson = function
   | `Assoc fields as json -> (
       match as_string (member "type" fields) with
       | "submit" -> Submit (submit_of_yojson json)
-      | "reconnect" -> Reconnect { batch_id = as_string (member "batch_id" fields) }
+      | "reconnect" ->
+          Reconnect
+            {
+              batch_id = as_string (member "batch_id" fields);
+              download =
+                (match List.assoc_opt "download" fields with
+                | Some value -> as_bool value
+                | None -> false);
+            }
       | "kill" -> Kill { batch_id = as_string (member "batch_id" fields) }
       | request_type -> invalid_arg ("unknown request: " ^ request_type))
   | _ -> invalid_arg "expected JSON object"

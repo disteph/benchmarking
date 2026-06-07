@@ -47,11 +47,18 @@ The harness includes:
 - client CLI validation tests
 - local client/server integration tests
 - normal submit/wait with result transfer
-- detach and reconnect
+- reconnect to running and finished batches
+- reconnect with and without result download
+- detach and later reconnect
+- kill and reconnect-to-killed-batch behavior
+- reconnect by server-side result folder, including relative folders, absolute
+  folders, duplicate imports, direct folder downloads, and empty-folder errors
 - server-side benchmark and executable roots for relative job paths
 - server and client `-runN` output directory collision behavior
 - max-memory rejection
 - timeout classification
+- solver suffix preservation in CSV names
+- spreadsheet `Totals`, `Clashes`, and per-solver tab generation
 
 The integration tests start a temporary local TCP server on `127.0.0.1`, so the
 test environment must allow loopback bind/connect.
@@ -83,9 +90,10 @@ Common server options:
   relative to the server process's current working directory. By default, no
   server log file is written; messages go to the server trace output.
 
-The server keeps its queue and reconnect table in memory. If the server exits,
-queued/running job state and reconnect job ids are lost, although files already
-written on the server disk remain there.
+The server keeps its queue, live batch table, and imported-folder table in
+memory. If the server exits, queued/running job state and batch ids are lost,
+although files already written on the server disk remain there. A completed
+CSV result folder can be imported later with `benchmark -reconnect FOLDER`.
 
 ## Submitting A Batch
 
@@ -141,8 +149,14 @@ Client options:
   Deprecated alias for `-excel`.
 - `-detach`
   Submit the batch and exit after server acceptance.
-- `-reconnect JOB_ID`
-  Reconnect to an existing server-side batch.
+- `-reconnect JOB_ID_OR_FOLDER`
+  Reconnect to an existing server-side batch id. If the id is unknown, the
+  server treats the argument as a result folder to import.
+- `-download`
+  Only valid with `-reconnect`. Download output files when the reconnect
+  finishes. Plain reconnect does not download.
+- `-kill JOB_ID`
+  Kill a queued or running batch.
 
 `-cores` is a server option. If passed to `benchmark`, the client exits with a
 migration message.
@@ -163,7 +177,8 @@ Path inputs are interpreted as follows:
 | client `-server-exe-root DIR` | server | relative to the server process's current working directory |
 | benchmark entry inside `BENCHMARK_LIST` | server | relative to `-server-benchmark-root` |
 | solver command argument | server | relative to `-server-exe-root` |
-| downloaded result directory | client | created in the client process's current working directory |
+| `-reconnect FOLDER` folder import | server | relative to server `-output-root` |
+| downloaded result directory | client | when downloading, created in the client process's current working directory |
 
 The paths used for execution are server-side paths:
 
@@ -225,9 +240,9 @@ Default path behavior summary:
   directory, made absolute on the client if necessary
 - client `-server-exe-root` omitted: client sends the client process's current
   working directory
-- downloaded result directory: always created under the client process's current
-  working directory using the server output directory basename, with `-runN` if
-  needed
+- downloaded result directory: when files are downloaded, created under the
+  client process's current working directory using the server output directory
+  basename, with `-runN` if needed
 
 ## Queueing And Progress
 
@@ -266,13 +281,84 @@ Reconnect behavior:
 
 - If the batch is still running, the client attaches and receives remaining
   progress events.
-- If the batch is already finished, the client receives the output files and the
-  final event immediately.
-- If the server has restarted or the id is unknown, reconnect fails clearly.
+- If the batch is already finished, the client receives the accepted and final
+  events immediately.
+- Plain reconnect does not download files or create a local output directory.
+- Add `-download` to download files at the end of the reconnect.
+- If the id is unknown, the server tries to interpret the argument as a
+  server-side result folder. If that also fails, reconnect fails clearly.
 
 Detached clients and killed clients do not receive output files at completion
-time, because there is no live TCP connection. Reconnect later to download the
-files, as long as the server process is still alive.
+time, because there is no live TCP connection. Use `-reconnect JOB_ID` to view
+status, or `-reconnect JOB_ID -download` to download files, as long as the
+server process is still alive.
+
+### Reconnect By Batch Id
+
+Use plain reconnect as a status/visualization operation:
+
+```sh
+benchmark -server 127.0.0.1:8765 -reconnect batch-000001
+```
+
+Use reconnect with download when you want a local copy of the server output
+files:
+
+```sh
+benchmark -server 127.0.0.1:8765 -reconnect batch-000001 -download
+```
+
+The server tracks whether each connected client asked for downloads. A regular
+non-detached submission is equivalent to a connection with download enabled.
+Plain reconnect is a connection with download disabled.
+
+### Reconnect By Result Folder
+
+If a batch id is unknown, `-reconnect` can import an existing server-side result
+folder:
+
+```sh
+benchmark -server 127.0.0.1:8765 -reconnect QF_NRA5-123456-t300
+```
+
+The folder argument is interpreted by the server:
+
+- a relative folder is resolved under server `-output-root`
+- an absolute folder is used as an absolute server-side path
+- the folder only needs to contain result CSV files
+- `log` and `results.xls` are optional
+
+Import behavior:
+
+- the server reads all `*.csv` files in the folder
+- `results.xls` is generated or overwritten in that folder
+- a new finished batch id is created and printed
+- reconnecting to the same canonical folder reuses the same batch id
+- `-download` works during the folder reconnect or during a later reconnect to
+  the new batch id
+
+Examples:
+
+```sh
+benchmark -server 127.0.0.1:8765 -reconnect QF_NRA5-123456-t300
+benchmark -server 127.0.0.1:8765 -reconnect QF_NRA5-123456-t300 -download
+benchmark -server 127.0.0.1:8765 -reconnect /srv/old-results/QF_NRA5 -download
+```
+
+Folder import is intended for completed CSV data. It does not recover queued or
+running jobs after a server restart.
+
+## Killing A Batch
+
+Kill a queued or running batch by id:
+
+```sh
+benchmark -server 127.0.0.1:8765 -kill batch-000001
+```
+
+The server removes pending jobs for that batch and cancels running jobs. Killing
+a batch does not download files. Reconnecting to a killed batch reports the
+killed status.
 
 ## Output Files
 
@@ -282,10 +368,14 @@ For a batch with `S` solver commands, the server writes:
 - one `<solver>.csv` per solver
 - `results.xls` if `-excel` or `-xml` was used
 
-So the batch produces:
+So a normal server-produced batch produces:
 
 - `S + 1` files without Excel
 - `S + 2` files with Excel
+
+Imported result folders may contain only CSV files initially. During import,
+the server writes `results.xls` into the imported folder. If there is no `log`
+file in the imported folder, downloads from that imported batch omit `log`.
 
 The `log` file is a diagnostic execution log. It records the command and
 interpreted result for each run. Full captured stdout/stderr are included only
@@ -326,17 +416,31 @@ not contain counting suffixes. They remain exactly:
 - `<solver>.csv`
 - `results.xls`
 
+## Spreadsheet Output
+
+`results.xls` is an Excel-readable SpreadsheetML workbook. It contains:
+
+- `Totals` as the first tab, with formulas over whole columns of each solver tab
+- `Clashes` as the second tab, listing benchmarks where at least one solver says
+  `sat` and another says `unsat`
+- one tab per solver after that, mirroring the corresponding CSV file
+
+Solver tabs do not include a header row. In `Clashes`, column A is the benchmark
+name and columns B onward are solver names. Each clash row includes the result
+reported by every solver for that benchmark.
+
 ## Result Transfer
 
-At the end of a connected run, the server sends the output files over the
-existing TCP connection. The client writes them locally and prints:
+At the end of a regular non-detached submission, the server sends the output
+files over the existing TCP connection. The client writes them locally and
+prints:
 
 ```text
 downloaded output files to /path/to/local/output-dir
 ```
 
-Reconnect to a completed job also transfers the files again into a fresh local
-directory.
+Plain reconnect never downloads files. Reconnect with `-download` transfers the
+files into a fresh local directory.
 
 ## Result Classification
 
@@ -393,6 +497,30 @@ Reconnect later:
 benchmark -server 127.0.0.1:8765 -reconnect batch-000001
 ```
 
+Reconnect later and download files:
+
+```sh
+benchmark -server 127.0.0.1:8765 -reconnect batch-000001 -download
+```
+
+Import an existing server result folder without downloading:
+
+```sh
+benchmark -server 127.0.0.1:8765 -reconnect old-result-folder
+```
+
+Import an existing server result folder and download:
+
+```sh
+benchmark -server 127.0.0.1:8765 -reconnect /srv/bench-results/old-result-folder -download
+```
+
+Kill a running batch:
+
+```sh
+benchmark -server 127.0.0.1:8765 -kill batch-000001
+```
+
 Generate Excel output:
 
 ```sh
@@ -432,4 +560,7 @@ relative solver command `yices` is resolved under `/opt/solvers` on the server.
 - There is no authentication.
 - The server executes arbitrary submitted commands as the server OS user.
 - `-generations 0` infinite mode is not supported in server mode.
-- Reconnect works only while the original server process is still alive.
+- Reconnect by batch id works only while the server process that knows that id
+  is still alive.
+- Reconnect by folder can recreate a finished batch id from CSV files, but it
+  cannot recover queued/running work.

@@ -142,6 +142,8 @@ let with_timing proc_mgr ~timeout ?memory ~log task =
 
 let prune filename = Filename.(filename |> basename |> remove_extension)
 
+let solver_output_name filename = Filename.basename filename
+
 let resolve_server_path ~root path =
   if Filename.is_relative path then Filename.concat root path else path
 
@@ -200,6 +202,13 @@ let result_file_names ~excel htbl =
   in
   [ "log" ] @ csvs @ if excel then [ "results.xls" ] else []
 
+let strip_suffix ~suffix s =
+  let ls = String.length s in
+  let lf = String.length suffix in
+  if ls >= lf && String.equal (String.sub s (ls - lf) lf) suffix then
+    Some (String.sub s 0 (ls - lf))
+  else None
+
 let read_file_binary path =
   let ch = open_in_bin path in
   Fun.protect
@@ -224,35 +233,114 @@ let rec drain_stream f stream =
     f t;
     drain_stream f stream
 
+let add_aggregate_result ~htbl ~nb_benchmarks command bench (msg : aggregate) =
+  let command_tbl =
+    HStrings.get_or_add htbl ~f:(fun _ -> HStrings.create nb_benchmarks) ~k:command
+  in
+  let value =
+    match HStrings.get command_tbl bench with
+    | None -> (1, msg)
+    | Some (n, previous) ->
+        ( n + 1,
+          match previous, msg with
+          | `Inconsistent, _ | _, `Inconsistent -> `Inconsistent
+          | `Crash msg, _ | _, `Crash msg -> `Crash msg
+          | `Timeout, _ | _, `Timeout -> `Timeout
+          | `Memout, _ | _, `Memout -> `Memout
+          | `Answer (a, t1), `Answer (b, t2) ->
+              if equal_answer a b then
+                `Answer
+                  ( a,
+                    {
+                      wall = t1.wall +. t2.wall;
+                      user = t1.user +. t2.user;
+                      system = t1.system +. t2.system;
+                    } )
+              else `Inconsistent )
+  in
+  HStrings.replace command_tbl bench value
+
 let add_result ~htbl ~nb_benchmarks command bench (msg : result) =
   match msg with
   | `Cancelled -> ()
   | #output as msg ->
-      let command_tbl =
-        HStrings.get_or_add htbl ~f:(fun _ -> HStrings.create nb_benchmarks) ~k:command
+      add_aggregate_result ~htbl ~nb_benchmarks command bench (msg :> aggregate)
+
+let csv_unquote s =
+  let len = String.length s in
+  if len >= 2 && Char.equal s.[0] '"' && Char.equal s.[len - 1] '"' then
+    String.sub s 1 (len - 2)
+  else s
+
+let csv_aggregate_of_fields ~path ~line_no fields =
+  let fail message =
+    invalid_arg (Format.sprintf "%s:%d: %s" path line_no message)
+  in
+  match fields with
+  | [ command; bench; result; wall; user; system ] -> (
+      let times =
+        try
+          {
+            wall = float_of_string wall;
+            user = float_of_string user;
+            system = float_of_string system;
+          }
+        with Failure _ -> fail "invalid time value"
       in
-      let value =
-        match HStrings.get command_tbl bench with
-        | None -> (1, (msg :> [ output | `Inconsistent ]))
-        | Some (n, previous) ->
-            ( n + 1,
-              match previous, msg with
-              | `Inconsistent, _ -> `Inconsistent
-              | `Crash msg, _ | _, `Crash msg -> `Crash msg
-              | `Timeout, _ | _, `Timeout -> `Timeout
-              | `Memout, _ | _, `Memout -> `Memout
-              | `Answer (a, t1), `Answer (b, t2) ->
-                  if equal_answer a b then
-                    `Answer
-                      ( a,
-                        {
-                          wall = t1.wall +. t2.wall;
-                          user = t1.user +. t2.user;
-                          system = t1.system +. t2.system;
-                        } )
-                  else `Inconsistent )
+      match result with
+      | "sat" -> (command, csv_unquote bench, `Answer (Sat, times))
+      | "unsat" -> (command, csv_unquote bench, `Answer (Unsat, times))
+      | _ -> fail ("result with times must be sat or unsat, got " ^ result))
+  | [ command; bench; result ] ->
+      let aggregate =
+        match result with
+        | "inconsistent" -> `Inconsistent
+        | "timeout" -> `Timeout
+        | "memout" -> `Memout
+        | "crash" -> `Crash (`Exception, "crash")
+        | "sat" | "unsat" -> fail ("missing time columns for " ^ result)
+        | _ -> fail ("unknown result: " ^ result)
       in
-      HStrings.replace command_tbl bench value
+      (command, csv_unquote bench, aggregate)
+  | _ -> fail "expected 3 or 6 tab-separated fields"
+
+let load_csv_file_into_hashtables ~htbl path =
+  let rows = ref 0 in
+  let ch = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in ch)
+    (fun () ->
+      let line_no = ref 0 in
+      (try
+         while true do
+           let line = input_line ch in
+           incr line_no;
+           if not (String.equal "" (String.trim line)) then (
+             let command, bench, aggregate =
+               csv_aggregate_of_fields ~path ~line_no:!line_no (String.split_on_char '\t' line)
+             in
+             incr rows;
+             add_aggregate_result ~htbl ~nb_benchmarks:16 command bench aggregate)
+         done
+       with End_of_file -> ());
+      !rows)
+
+let load_csv_dir_native dir =
+  if not (Sys.file_exists dir && Sys.is_directory dir) then
+    invalid_arg ("not a directory: " ^ dir);
+  let htbl = HStrings.create 16 in
+  let total_rows =
+    Sys.readdir dir |> Array.to_list |> List.sort String.compare
+    |> List.filter_map (fun name ->
+           match strip_suffix ~suffix:".csv" name with
+           | Some _ -> Some (Filename.concat dir name)
+           | None -> None)
+    |> List.fold_left
+         (fun total path -> total + load_csv_file_into_hashtables ~htbl path)
+         0
+  in
+  if total_rows = 0 then invalid_arg ("no CSV result rows found in " ^ dir);
+  (htbl, total_rows)
 
 let stream_to_hashtables ~htbl ~nb_benchmarks stream =
   drain_stream
@@ -320,7 +408,7 @@ let hashtables_to_files_native out_path htbl sort =
   in
   Seq.iter process out_seq
 
-let hashtables_to_excel_native out_path htbl sort =
+let hashtables_to_excel_native ?(overwrite = false) out_path htbl sort =
   let project command (instance, r) =
     match r with
     | `Answer (Unsat, { wall; user; system }) ->
@@ -332,20 +420,51 @@ let hashtables_to_excel_native out_path htbl sort =
     | `Memout -> (command, instance, "memout", None)
     | `Crash _msg -> (command, instance, "crash", None)
   in
-  let rows =
-    HStrings.to_list htbl
-    |> List.sort (fun (c1, _) (c2, _) -> String.compare_natural c1 c2)
-    |> List.flat_map (fun (command, command_tbl) ->
-           HStrings.to_list command_tbl |> List.map average |> List.sort sort
-           |> List.map (project command))
+  let result_label command_tbl benchmark =
+    match HStrings.get command_tbl benchmark with
+    | Some (_, aggregate) -> output_label aggregate
+    | None -> ""
+  in
+  let has_sat_and_unsat outputs =
+    List.exists (String.equal "sat") outputs && List.exists (String.equal "unsat") outputs
+  in
+  let commands =
+    HStrings.to_list htbl |> List.sort (fun (c1, _) (c2, _) -> String.compare_natural c1 c2)
+  in
+  let clashes =
+    let benchmarks =
+      commands
+      |> List.concat_map (fun (_, command_tbl) ->
+             HStrings.to_list command_tbl |> List.map fst)
+      |> Stdlib.List.sort_uniq String.compare_natural
+    in
+    benchmarks
+    |> List.filter_map (fun benchmark ->
+           let outputs =
+             List.map (fun (_, command_tbl) -> result_label command_tbl benchmark) commands
+           in
+           if has_sat_and_unsat outputs then Some { Excel.benchmark; outputs } else None)
+  in
+  let sheets =
+    commands
+    |> List.mapi (fun i (command, command_tbl) ->
+           let rows =
+             HStrings.to_list command_tbl |> List.map average |> List.sort sort
+             |> List.map (project command)
+           in
+           { Excel.name = Format.sprintf "Sheet%i" (i + 1); rows })
   in
   let filename = Filename.concat out_path "results.xls" in
-  let ch = open_out_gen [ Open_wronly; Open_creat; Open_excl ] 0o640 filename in
+  let open_flags =
+    if overwrite then [ Open_wronly; Open_creat; Open_trunc ]
+    else [ Open_wronly; Open_creat; Open_excl ]
+  in
+  let ch = open_out_gen open_flags 0o640 filename in
   Fun.protect
     ~finally:(fun () -> close_out ch)
     (fun () ->
       let fmt = Format.formatter_of_out_channel ch in
-      Format.fprintf fmt "%a" Excel.pp_table rows;
+      Format.fprintf fmt "%a" Excel.pp_workbook (sheets, clashes);
       Format.pp_print_flush fmt ())
 
 let sort_of_name = function

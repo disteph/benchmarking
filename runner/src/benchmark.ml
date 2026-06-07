@@ -12,6 +12,7 @@ let server = ref (Sys.getenv_opt "BENCHMARK_SERVER" |> Option.value ~default:"12
 let cores_was_used = ref None
 let reconnect = ref None
 let kill = ref None
+let download = ref false
 let server_benchmark_root = ref None
 let server_exe_root = ref None
 
@@ -168,7 +169,7 @@ let print_download_dir = function
   | Some dir -> Printf.printf "downloaded output files to %s\n%!" dir
   | None -> ()
 
-let wait_with_progress reader ~local_output_dir ~initial_prior_completed ~prior_total
+let wait_with_progress reader ~download_outputs ~local_output_dir ~initial_prior_completed ~prior_total
     ~initial_completed ~total =
   let prior_completed = ref 0 in
   let completed = ref 0 in
@@ -197,7 +198,7 @@ let wait_with_progress reader ~local_output_dir ~initial_prior_completed ~prior_
           apply_prior_completed update_progress new_completed;
           loop ()
       | Protocol.Output_file { name; contents; _ } ->
-          write_output_file local_output_dir ~name ~contents;
+          if download_outputs then write_output_file local_output_dir ~name ~contents;
           loop ()
       | Protocol.Job_finished { completed = new_completed; _ } ->
           apply_completed update_progress new_completed;
@@ -221,11 +222,11 @@ let wait_with_progress reader ~local_output_dir ~initial_prior_completed ~prior_
   in
   print_final_event final_event;
   (match final_event with
-  | Protocol.Batch_finished _ -> print_download_dir !local_output_dir
+  | Protocol.Batch_finished _ when download_outputs -> print_download_dir !local_output_dir
   | _ -> ());
   code
 
-let submit ~detach_after_accept request =
+let submit ~detach_after_accept ~download_outputs request =
   let host, port = parse_server !server in
   Eio_main.run @@ fun env ->
   Eio.Net.with_tcp_connect ~host ~service:(string_of_int port) (Stdenv.net env) @@ fun flow ->
@@ -236,27 +237,28 @@ let submit ~detach_after_accept request =
   print_event first_event;
   let local_output_dir = ref None in
   (match first_event with
-  | Protocol.Accepted { output_dir; _ } when not detach_after_accept ->
+  | Protocol.Accepted { output_dir; _ } when not detach_after_accept && download_outputs ->
       ignore (ensure_local_output_dir local_output_dir output_dir)
   | _ -> ());
   match first_event with
   | Protocol.Accepted _ when detach_after_accept -> 0
   | Protocol.Accepted { total_jobs; completed; prior_jobs; prior_completed; _ } ->
-      wait_with_progress reader ~local_output_dir ~initial_prior_completed:prior_completed
-        ~prior_total:prior_jobs ~initial_completed:completed ~total:total_jobs
+      wait_with_progress reader ~download_outputs ~local_output_dir
+        ~initial_prior_completed:prior_completed ~prior_total:prior_jobs
+        ~initial_completed:completed ~total:total_jobs
   | Protocol.Batch_finished _ -> 0
   | Protocol.Batch_failed _ -> 1
   | Protocol.Batch_killed _ -> 0
   | Protocol.Job_finished { completed; total; _ } ->
-      wait_with_progress reader ~local_output_dir ~initial_prior_completed:0 ~prior_total:0
-        ~initial_completed:completed ~total
+      wait_with_progress reader ~download_outputs ~local_output_dir ~initial_prior_completed:0
+        ~prior_total:0 ~initial_completed:completed ~total
   | Protocol.Queue_progress { completed; total; _ } ->
-      wait_with_progress reader ~local_output_dir ~initial_prior_completed:completed
-        ~prior_total:total ~initial_completed:0 ~total:1
+      wait_with_progress reader ~download_outputs ~local_output_dir
+        ~initial_prior_completed:completed ~prior_total:total ~initial_completed:0 ~total:1
   | Protocol.Output_file { name; contents; _ } ->
-      write_output_file local_output_dir ~name ~contents;
-      wait_with_progress reader ~local_output_dir ~initial_prior_completed:0 ~prior_total:0
-        ~initial_completed:0 ~total:1
+      if download_outputs then write_output_file local_output_dir ~name ~contents;
+      wait_with_progress reader ~download_outputs ~local_output_dir ~initial_prior_completed:0
+        ~prior_total:0 ~initial_completed:0 ~total:1
 
 let options =
   [
@@ -279,7 +281,10 @@ let options =
       Arg.String (fun root -> server_exe_root := Some root),
       "Server-visible root for relative solver commands" );
     ("-detach", Arg.Set detach, "Submit the batch and exit after server acceptance");
-    ("-reconnect", Arg.String (fun id -> reconnect := Some id), "Reconnect to an existing server job id");
+    ( "-reconnect",
+      Arg.String (fun id -> reconnect := Some id),
+      "Reconnect to an existing server job id or import a server-side result folder" );
+    ("-download", Arg.Set download, "Download output files at the end of a reconnect");
     ("-kill", Arg.String (fun id -> kill := Some id), "Kill an existing server job id");
   ]
 
@@ -290,17 +295,22 @@ let description =
 
 let () =
   Arg.parse options (fun a -> args := a :: !args) description;
+  if !download && Option.is_none !reconnect then (
+    prerr_endline "benchmark: -download only applies with -reconnect";
+    exit 2);
   match !reconnect, !kill, List.rev !args with
   | Some _, Some _, _ ->
       prerr_endline "benchmark: -reconnect and -kill are mutually exclusive";
       exit 2
   | Some batch_id, None, [] ->
-      exit (submit ~detach_after_accept:false (Protocol.Reconnect { batch_id }))
+      exit
+        (submit ~detach_after_accept:false ~download_outputs:!download
+           (Protocol.Reconnect { batch_id; download = !download }))
   | Some _, None, _ ->
       prerr_endline "benchmark: -reconnect does not take a benchmark file or solver command";
       exit 2
   | None, Some batch_id, [] ->
-      exit (submit ~detach_after_accept:false (Protocol.Kill { batch_id }))
+      exit (submit ~detach_after_accept:false ~download_outputs:false (Protocol.Kill { batch_id }))
   | None, Some _, _ ->
       prerr_endline "benchmark: -kill does not take a benchmark file or solver command";
       exit 2
@@ -327,6 +337,8 @@ let () =
           detach = !detach;
         }
       in
-      exit (submit ~detach_after_accept:!detach (Protocol.Submit request))
+      exit
+        (submit ~detach_after_accept:!detach ~download_outputs:true
+           (Protocol.Submit request))
   | None, None, _ ->
       Printf.printf "%s\n" (Arg.usage_string options "Usage: benchmark [options] BENCHMARK_FILE COMMAND...")

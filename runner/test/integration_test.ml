@@ -19,6 +19,26 @@ let contains ~needle haystack =
   in
   ln = 0 || loop 0
 
+let index_of ~needle haystack =
+  let ln = String.length needle in
+  let lh = String.length haystack in
+  let rec loop i =
+    if i + ln > lh then None
+    else if String.sub haystack i ln = needle then Some i
+    else loop (i + 1)
+  in
+  if ln = 0 then Some 0 else loop 0
+
+let count_occurrences ~needle haystack =
+  let ln = String.length needle in
+  let lh = String.length haystack in
+  let rec loop i count =
+    if ln = 0 || i + ln > lh then count
+    else if String.sub haystack i ln = needle then loop (i + ln) (count + 1)
+    else loop (i + 1) count
+  in
+  loop 0 0
+
 let lines s = String.split_on_char '\n' s
 
 let find_line ~prefix s =
@@ -208,6 +228,12 @@ let test_client_cores_rejected ~client ~client_cwd list_path solver =
   assert_exit "client -cores rejection" 2 result;
   assert_bool "client -cores message" (contains ~needle:"-cores is now" result.output)
 
+let test_download_requires_reconnect ~client ~client_cwd ~port =
+  let result = run_client ~client ~client_cwd ~port [ "-download" ] in
+  assert_exit "client -download rejection" 2 result;
+  assert_bool "client -download message"
+    (contains ~needle:"-download only applies with -reconnect" result.output)
+
 let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_root list_path
     solver =
   let result =
@@ -218,8 +244,22 @@ let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_r
   assert_exit "normal submit" 0 result;
   assert_bool "accepted id printed" (contains ~needle:"accepted job id batch-" result.output);
   let dir = download_dir_of_output result.output in
-  assert_files_exact dir [ "log"; "results.xls"; "sat_solver.csv" ];
-  assert_csv_contains_sat dir "sat_solver";
+  assert_files_exact dir [ "log"; "results.xls"; "sat_solver.sh.csv" ];
+  assert_csv_contains_sat dir "sat_solver.sh";
+  (batch_id_of_output result.output, dir)
+
+let test_finished_batch_reconnect_modes ~client ~client_cwd ~port batch_id =
+  let reconnect = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id ] in
+  assert_exit "finished batch reconnect without download" 0 reconnect;
+  assert_bool "finished batch reconnect should finish"
+    (contains ~needle:("finished " ^ batch_id) reconnect.output);
+  assert_bool "finished batch reconnect should not download"
+    (not (contains ~needle:"downloaded output files to " reconnect.output));
+  let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
+  assert_exit "finished batch reconnect with download" 0 download;
+  let dir = download_dir_of_output download.output in
+  assert_files_exact dir [ "log"; "results.xls"; "sat_solver.sh.csv" ];
+  assert_csv_contains_sat dir "sat_solver.sh";
   dir
 
 let test_detach_and_reconnect ~client ~client_cwd ~port ~bench_root ~exe_root list_path solver =
@@ -231,10 +271,47 @@ let test_detach_and_reconnect ~client ~client_cwd ~port ~bench_root ~exe_root li
   let batch_id = batch_id_of_output detach.output in
   let reconnect = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id ] in
   assert_exit "reconnect" 0 reconnect;
-  let dir = download_dir_of_output reconnect.output in
-  assert_files_exact dir [ "log"; "sat_solver.csv" ];
-  assert_csv_contains_sat dir "sat_solver";
+  assert_bool "plain reconnect should not download files"
+    (not (contains ~needle:"downloaded output files to " reconnect.output));
+  let reconnect_with_download =
+    run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ]
+  in
+  assert_exit "reconnect with download" 0 reconnect_with_download;
+  let dir = download_dir_of_output reconnect_with_download.output in
+  assert_files_exact dir [ "log"; "sat_solver.sh.csv" ];
+  assert_csv_contains_sat dir "sat_solver.sh";
   dir
+
+let test_running_reconnect_without_download ~client ~client_cwd ~port ~bench_root ~exe_root
+    list_path solver =
+  let detach =
+    run_client ~client ~client_cwd ~port
+      (with_server_roots ~bench_root ~exe_root [ "-timeout"; "20"; "-detach"; list_path; solver ])
+  in
+  assert_exit "running reconnect detach submit" 0 detach;
+  let batch_id = batch_id_of_output detach.output in
+  let reconnect = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id ] in
+  assert_exit "running reconnect without download" 0 reconnect;
+  assert_bool "running reconnect should finish"
+    (contains ~needle:("finished " ^ batch_id) reconnect.output);
+  assert_bool "running reconnect without download should not download"
+    (not (contains ~needle:"downloaded output files to " reconnect.output))
+
+let test_kill_batch ~client ~client_cwd ~port ~bench_root ~exe_root list_path solver =
+  let detach =
+    run_client ~client ~client_cwd ~port
+      (with_server_roots ~bench_root ~exe_root [ "-timeout"; "60"; "-detach"; list_path; solver ])
+  in
+  assert_exit "kill detach submit" 0 detach;
+  let batch_id = batch_id_of_output detach.output in
+  let killed = run_client ~client ~client_cwd ~port [ "-kill"; batch_id ] in
+  assert_exit "kill batch" 0 killed;
+  assert_bool "kill message" (contains ~needle:("killed " ^ batch_id) killed.output);
+  assert_bool "kill should not download"
+    (not (contains ~needle:"downloaded output files to " killed.output));
+  let reconnect = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id ] in
+  assert_exit "reconnect killed batch" 0 reconnect;
+  assert_bool "reconnect killed message" (contains ~needle:("killed " ^ batch_id) reconnect.output)
 
 let test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_root =
   let list_dir = Filename.concat client_cwd "relative-list" in
@@ -251,8 +328,8 @@ let test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_r
   in
   assert_exit "server root relative paths" 0 result;
   let dir = download_dir_of_output result.output in
-  assert_files_exact dir [ "log"; "relative_solver.csv" ];
-  assert_csv_contains_sat dir "relative_solver"
+  assert_files_exact dir [ "log"; "relative_solver.sh.csv" ];
+  assert_csv_contains_sat dir "relative_solver.sh"
 
 let test_absolute_server_paths ~client ~client_cwd ~port ~bench_root ~exe_root =
   let absolute_case = Filename.concat bench_root "absolute-case.smt2" in
@@ -268,8 +345,8 @@ let test_absolute_server_paths ~client ~client_cwd ~port ~bench_root ~exe_root =
   in
   assert_exit "absolute server paths" 0 result;
   let dir = download_dir_of_output result.output in
-  assert_files_exact dir [ "absolute_solver.csv"; "log" ];
-  assert_csv_contains_sat dir "absolute_solver"
+  assert_files_exact dir [ "absolute_solver.sh.csv"; "log" ];
+  assert_csv_contains_sat dir "absolute_solver.sh"
 
 let test_memory_rejection ~client ~client_cwd ~port ~bench_root ~exe_root list_path solver =
   let result =
@@ -294,8 +371,134 @@ let test_timeout_classification ~client ~client_cwd ~port ~bench_root ~exe_root 
   in
   assert_exit "timeout classification" 0 result;
   let dir = download_dir_of_output result.output in
-  let csv = read_file (Filename.concat dir "timeout_solver.csv") in
+  let csv = read_file (Filename.concat dir "timeout_solver.sh.csv") in
   assert_bool "CSV should contain timeout" (contains ~needle:"\ttimeout" csv)
+
+let test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_root =
+  let list_path = Filename.concat client_cwd "suffix-list.txt" in
+  let case_path = Filename.concat bench_root "suffix-case.smt2" in
+  let mcsat_solver = Filename.concat exe_root "same_stem.mcsat" in
+  let cdclt_solver = Filename.concat exe_root "same_stem.cdclT" in
+  write_file case_path "(set-logic QF_UF)\n";
+  write_file list_path "suffix-case.smt2\n";
+  make_solver mcsat_solver "echo sat\n";
+  make_solver cdclt_solver "echo unsat\n";
+  let result =
+    run_client ~client ~client_cwd ~port
+      (with_server_roots ~bench_root ~exe_root
+         [ "-timeout"; "5"; "-excel"; list_path; "same_stem.mcsat"; "same_stem.cdclT" ])
+  in
+  assert_exit "solver suffixes preserved" 0 result;
+  let dir = download_dir_of_output result.output in
+  assert_files_exact dir
+    [ "log"; "results.xls"; "same_stem.cdclT.csv"; "same_stem.mcsat.csv" ];
+  assert_csv_contains_sat dir "same_stem.mcsat";
+  let cdclt_csv = read_file (Filename.concat dir "same_stem.cdclT.csv") in
+  assert_bool "cdclT CSV should contain unsat result" (contains ~needle:"\tunsat" cdclt_csv);
+  let xls = read_file (Filename.concat dir "results.xls") in
+  assert_bool "results.xls should include mcsat suffix" (contains ~needle:"same_stem.mcsat" xls);
+  assert_bool "results.xls should include cdclT suffix" (contains ~needle:"same_stem.cdclT" xls);
+  assert_bool "results.xls should have Totals worksheet"
+    (contains ~needle:"<Worksheet ss:Name=\"Totals\">" xls);
+  assert_bool "results.xls should have Clashes worksheet"
+    (contains ~needle:"<Worksheet ss:Name=\"Clashes\">" xls);
+  assert_bool "results.xls should have first solver worksheet"
+    (contains ~needle:"<Worksheet ss:Name=\"Sheet1\">" xls);
+  assert_bool "results.xls should have second solver worksheet"
+    (contains ~needle:"<Worksheet ss:Name=\"Sheet2\">" xls);
+  assert_bool "results.xls should use whole result column in COUNTIF"
+    (contains ~needle:"=COUNTIF(Sheet1!C:C,&quot;unsat&quot;)" xls);
+  assert_bool "results.xls should use whole time column in SUMIF"
+    (contains ~needle:"=SUMIF(Sheet1!C:C,&quot;sat&quot;,Sheet1!E:E)" xls);
+  assert_bool "results.xls should not use old HTML header"
+    (not (contains ~needle:"<tr><th>Solver</th>" xls));
+  let worksheet_index name =
+    match index_of ~needle:("<Worksheet ss:Name=\"" ^ name ^ "\">") xls with
+    | Some i -> i
+    | None -> fail ("missing worksheet " ^ name)
+  in
+  assert_bool "Clashes worksheet should be after Totals"
+    (worksheet_index "Totals" < worksheet_index "Clashes");
+  assert_bool "Clashes worksheet should be before solver sheets"
+    (worksheet_index "Clashes" < worksheet_index "Sheet1");
+  assert_bool "Clashes header should list solver names"
+    (contains
+       ~needle:
+         "<Row><Cell><Data ss:Type=\"String\">Benchmark</Data></Cell><Cell><Data \
+          ss:Type=\"String\">same_stem.cdclT</Data></Cell><Cell><Data \
+          ss:Type=\"String\">same_stem.mcsat</Data></Cell></Row>"
+       xls);
+  let clash_row =
+    "<Row><Cell><Data ss:Type=\"String\">suffix-case.smt2</Data></Cell><Cell><Data \
+     ss:Type=\"String\">unsat</Data></Cell><Cell><Data ss:Type=\"String\">sat</Data></Cell></Row>"
+  in
+  assert_bool "Clashes worksheet should contain exactly one row for the clashing benchmark"
+    (count_occurrences ~needle:clash_row xls = 1)
+
+let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
+  let import_dir = Filename.concat server_root "imported-csvs" in
+  mkdir_p import_dir;
+  write_file (Filename.concat import_dir "solver_a.csv")
+    "solver_a\t\"case-1.smt2\"\tsat\t1.000000\t2.000000\t3.000000\n\
+     solver_a\t\"case-2.smt2\"\ttimeout\n";
+  write_file (Filename.concat import_dir "solver_b.csv")
+    "solver_b\t\"case-1.smt2\"\tunsat\t4.000000\t5.000000\t6.000000\n";
+  let import = run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs" ] in
+  assert_exit "folder reconnect import" 0 import;
+  assert_bool "folder reconnect should print accepted id"
+    (contains ~needle:"accepted job id batch-" import.output);
+  assert_bool "folder reconnect should finish"
+    (contains ~needle:"finished batch-" import.output);
+  assert_bool "folder reconnect without -download should not download"
+    (not (contains ~needle:"downloaded output files to " import.output));
+  assert_bool "folder reconnect should produce results.xls on server"
+    (Sys.file_exists (Filename.concat import_dir "results.xls"));
+  let batch_id = batch_id_of_output import.output in
+  let same_folder = run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs" ] in
+  assert_exit "folder reconnect reuse" 0 same_folder;
+  let reused_batch_id = batch_id_of_output same_folder.output in
+  assert_bool "folder reconnect should reuse batch id" (String.equal batch_id reused_batch_id);
+  let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
+  assert_exit "folder reconnect download by batch id" 0 download;
+  let dir = download_dir_of_output download.output in
+  assert_files_exact dir [ "results.xls"; "solver_a.csv"; "solver_b.csv" ];
+  let direct_download =
+    run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs"; "-download" ]
+  in
+  assert_exit "folder reconnect direct download" 0 direct_download;
+  let direct_batch_id = batch_id_of_output direct_download.output in
+  assert_bool "direct folder download should reuse batch id"
+    (String.equal batch_id direct_batch_id);
+  let direct_dir = download_dir_of_output direct_download.output in
+  assert_files_exact direct_dir [ "results.xls"; "solver_a.csv"; "solver_b.csv" ];
+  let xls = read_file (Filename.concat dir "results.xls") in
+  assert_bool "imported spreadsheet should have Totals worksheet"
+    (contains ~needle:"<Worksheet ss:Name=\"Totals\">" xls);
+  assert_bool "imported spreadsheet should have Clashes worksheet"
+    (contains ~needle:"<Worksheet ss:Name=\"Clashes\">" xls);
+  assert_bool "imported spreadsheet should include clashing benchmark"
+    (contains ~needle:"case-1.smt2" xls)
+
+let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
+  let import_dir = Filename.concat root "absolute-imported-csvs" in
+  mkdir_p import_dir;
+  write_file (Filename.concat import_dir "solver_abs.csv")
+    "solver_abs\t\"abs-case.smt2\"\tsat\t7.000000\t8.000000\t9.000000\n";
+  let import = run_client ~client ~client_cwd ~port [ "-reconnect"; import_dir; "-download" ] in
+  assert_exit "absolute folder reconnect import" 0 import;
+  assert_bool "absolute folder reconnect should print accepted id"
+    (contains ~needle:"accepted job id batch-" import.output);
+  let dir = download_dir_of_output import.output in
+  assert_files_exact dir [ "results.xls"; "solver_abs.csv" ];
+  assert_csv_contains_sat dir "solver_abs"
+
+let test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root =
+  let empty_dir = Filename.concat server_root "empty-import" in
+  mkdir_p empty_dir;
+  let result = run_client ~client ~client_cwd ~port [ "-reconnect"; "empty-import" ] in
+  assert_exit "empty folder reconnect rejection" 1 result;
+  assert_bool "empty folder reconnect message"
+    (contains ~needle:"no CSV result rows found" result.output)
 
 let test_server_output_collision server_root =
   let dirs =
@@ -338,8 +541,12 @@ let () =
   mkdir_p solver_dir;
   let sat_solver = Filename.concat solver_dir "sat_solver.sh" in
   let timeout_solver = Filename.concat solver_dir "timeout_solver.sh" in
+  let slow_solver = Filename.concat solver_dir "slow_solver.sh" in
+  let kill_solver = Filename.concat solver_dir "kill_solver.sh" in
   make_solver sat_solver "echo sat\n";
   make_solver timeout_solver "sleep 3\necho sat\n";
+  make_solver slow_solver "sleep 2\necho sat\n";
+  make_solver kill_solver "sleep 30\necho sat\n";
   let list_path = Filename.concat client_cwd "benchmarks.txt" in
   write_file list_path "sat-case-1.smt2\nsat-case-2.smt2\n";
   write_file (Filename.concat bench_root "sat-case-1.smt2") "(set-logic QF_UF)\n";
@@ -355,16 +562,22 @@ let () =
     (fun () ->
       wait_for_server port;
       test_client_cores_rejected ~client ~client_cwd list_path sat_solver;
-      let first_dir =
+      test_download_requires_reconnect ~client ~client_cwd ~port;
+      let first_batch_id, first_dir =
         test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root
           ~exe_root:solver_dir list_path "sat_solver.sh"
       in
+      ignore (test_finished_batch_reconnect_modes ~client ~client_cwd ~port first_batch_id);
       let reconnect_dir =
         test_detach_and_reconnect ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir
           list_path "sat_solver.sh"
       in
       assert_bool "client reconnect download should use -runN"
         (starts_with ~prefix:(Filename.basename first_dir ^ "-run") (Filename.basename reconnect_dir));
+      test_running_reconnect_without_download ~client ~client_cwd ~port ~bench_root
+        ~exe_root:solver_dir list_path "slow_solver.sh";
+      test_kill_batch ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir list_path
+        "kill_solver.sh";
       test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
       test_absolute_server_paths ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
       test_memory_rejection ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir list_path
@@ -372,5 +585,9 @@ let () =
       test_unknown_reconnect ~client ~client_cwd ~port;
       test_timeout_classification ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir
         list_path "timeout_solver.sh";
+      test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
+      test_reconnect_folder_import ~client ~client_cwd ~port ~server_root;
+      test_reconnect_absolute_folder_import ~client ~client_cwd ~port root;
+      test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root;
       test_server_output_collision server_root);
   print_endline "integration tests passed"

@@ -9,6 +9,11 @@ type job = {
   reserve_memory : int;
 }
 
+and watcher = {
+  events : Protocol.event Stream.t;
+  download : bool;
+}
+
 and batch = {
   sequence : int;
   id : string;
@@ -19,7 +24,7 @@ and batch = {
   log_done : bool ref;
   log_drained : Eio.Condition.t;
   mutable log_closed : bool;
-  watchers : Protocol.event Stream.t list ref;
+  watchers : watcher list ref;
   running_switches : Switch.t list ref;
   total_jobs : int;
   prior_jobs : int;
@@ -43,6 +48,7 @@ type state = {
   mutable running : int;
   mutable reserved_memory : int;
   batches : (string, batch) Hashtbl.t;
+  folder_batches : (string, batch) Hashtbl.t;
   wake_scheduler : Eio.Condition.t;
   log_server : string -> unit;
 }
@@ -65,16 +71,22 @@ let accepted_event batch =
       prior_completed = batch.prior_completed;
     }
 
-let add_watcher batch =
+let add_watcher batch ~download =
   let events = Stream.create max_int in
-  batch.watchers := events :: !(batch.watchers);
-  events
+  let watcher = { events; download } in
+  batch.watchers := watcher :: !(batch.watchers);
+  watcher
 
-let remove_watcher batch events =
-  batch.watchers := List.filter (fun existing -> existing != events) !(batch.watchers)
+let remove_watcher batch watcher =
+  batch.watchers := List.filter (fun existing -> existing != watcher) !(batch.watchers)
 
 let publish batch event =
-  List.iter (fun events -> Stream.add events event) !(batch.watchers)
+  List.iter
+    (fun watcher ->
+      match event with
+      | Output_file _ when not watcher.download -> ()
+      | _ -> Stream.add watcher.events event)
+    !(batch.watchers)
 
 let output_file_names batch =
   Common.result_file_names ~excel:batch.request.excel batch.htbl
@@ -107,6 +119,13 @@ let unfinished_jobs batch =
 
 let prior_jobs state =
   Hashtbl.fold (fun _ batch total -> total + unfinished_jobs batch) state.batches 0
+
+let next_batch_identity state =
+  let sequence =
+    state.next_batch <- state.next_batch + 1;
+    state.next_batch
+  in
+  (sequence, Format.sprintf "batch-%06d" sequence)
 
 let publish_prior_progress state finished_batch =
   Hashtbl.iter
@@ -200,7 +219,7 @@ let run_job proc_mgr state job =
       in
       match batch.status with
       | Running ->
-          let solver_name = Common.prune job.solver in
+          let solver_name = Common.solver_output_name job.solver in
           Common.add_result ~htbl:batch.htbl ~nb_benchmarks:(List.length request.lines)
             solver_name job.benchmark result;
           batch.completed <- batch.completed + 1;
@@ -255,11 +274,7 @@ let validate_request state (request : Protocol.submit_request) =
     | _ -> Ok ()
 
 let create_batch state (request : Protocol.submit_request) =
-  let sequence =
-    state.next_batch <- state.next_batch + 1;
-    state.next_batch
-  in
-  let id = Format.sprintf "batch-%06d" sequence in
+  let sequence, id = next_batch_identity state in
   let digest =
     Common.digest ~benchmark_file:request.benchmark_name ~lines:request.lines
       ~timeout:request.timeout ?memory:request.memory ()
@@ -289,6 +304,100 @@ let create_batch state (request : Protocol.submit_request) =
   in
   Hashtbl.add state.batches id batch;
   (batch, total_jobs)
+
+let canonical_directory path =
+  if not (Sys.file_exists path && Sys.is_directory path) then
+    Error (Format.sprintf "not a directory: %s" path)
+  else
+    try Ok (Unix.realpath path)
+    with Unix.Unix_error (error, _, _) ->
+      Error (Format.sprintf "cannot resolve %s: %s" path (Unix.error_message error))
+
+let rec path_is_under ~root path =
+  String.equal root path
+  ||
+  let parent = Filename.dirname path in
+  not (String.equal parent path) && path_is_under ~root parent
+
+let resolve_reconnect_folder state folder =
+  if Filename.is_relative folder then
+    match canonical_directory state.output_root with
+    | Error message -> Error message
+    | Ok root -> (
+        let path = Filename.concat root folder in
+        match canonical_directory path with
+        | Error message -> Error message
+        | Ok path ->
+            if path_is_under ~root path then Ok path
+            else Error (Format.sprintf "relative folder escapes output root: %s" folder))
+  else canonical_directory folder
+
+let htbl_commands htbl =
+  Common.HStrings.to_list htbl |> List.map fst |> List.sort String.compare
+
+let htbl_benchmarks htbl =
+  Common.HStrings.to_list htbl
+  |> List.concat_map (fun (_, command_tbl) ->
+         Common.HStrings.to_list command_tbl |> List.map fst)
+  |> List.sort_uniq String.compare
+
+let create_imported_batch state ~folder ~htbl ~total_jobs =
+  let sequence, id = next_batch_identity state in
+  let request : Protocol.submit_request =
+    {
+      benchmark_file = folder;
+      benchmark_name = Filename.basename folder;
+      server_benchmark_root = "";
+      server_exe_root = "";
+      lines = htbl_benchmarks htbl;
+      commands = htbl_commands htbl;
+      timeout = 1;
+      memory = None;
+      generations = 1;
+      sort = "alpha";
+      excel = true;
+      detach = false;
+    }
+  in
+  let batch =
+    {
+      sequence;
+      id;
+      request;
+      out_dir = folder;
+      htbl;
+      log = Stream.create max_int;
+      log_done = ref true;
+      log_drained = Eio.Condition.create ();
+      log_closed = true;
+      watchers = ref [];
+      running_switches = ref [];
+      total_jobs;
+      prior_jobs = 0;
+      prior_completed = 0;
+      completed = total_jobs;
+      status = Finished;
+    }
+  in
+  Hashtbl.add state.batches id batch;
+  Hashtbl.add state.folder_batches folder batch;
+  batch
+
+let batch_of_reconnect_folder state folder =
+  match resolve_reconnect_folder state folder with
+  | Error message -> Error message
+  | Ok folder -> (
+      match Hashtbl.find_opt state.folder_batches folder with
+      | Some batch -> Ok batch
+      | None -> (
+          try
+            let htbl, total_jobs = Common.load_csv_dir_native folder in
+            Common.hashtables_to_excel_native ~overwrite:true folder htbl Common.cmp_user;
+            let batch = create_imported_batch state ~folder ~htbl ~total_jobs in
+            state.log_server
+              (Format.sprintf "imported %s as %s with %i CSV rows" folder batch.id total_jobs);
+            Ok batch
+          with exn -> Error (Printexc.to_string exn)))
 
 let enqueue_jobs state batch =
   let request = batch.request in
@@ -363,12 +472,12 @@ let handle_submit state sw request =
   | Error message -> Error message
   | Ok () ->
       let batch, total_jobs = create_batch state request in
-      let events = if request.detach then None else Some (add_watcher batch) in
+      let watcher = if request.detach then None else Some (add_watcher batch ~download:true) in
       start_log_drain sw batch;
       enqueue_jobs state batch;
       state.log_server
         (Format.sprintf "accepted %s with %i jobs into %s" batch.id total_jobs batch.out_dir);
-      Ok (batch, events)
+      Ok (batch, watcher)
 
 let rec drain_events writer events =
   let event = Stream.take events in
@@ -377,23 +486,23 @@ let rec drain_events writer events =
   | Batch_finished _ | Batch_failed _ | Batch_killed _ -> ()
   | _ -> drain_events writer events
 
-let watch_stream writer batch events =
+let watch_stream writer batch watcher =
   Fun.protect
-    ~finally:(fun () -> remove_watcher batch events)
+    ~finally:(fun () -> remove_watcher batch watcher)
     (fun () ->
       send_event writer (accepted_event batch);
       match batch.status with
-      | Running -> drain_events writer events
+      | Running -> drain_events writer watcher.events
       | Finished ->
-          send_output_files writer batch;
+          if watcher.download then send_output_files writer batch;
           send_event writer
             (Batch_finished { batch_id = batch.id; output_dir = batch.out_dir })
       | Failed message -> send_event writer (Batch_failed { batch_id = batch.id; message })
       | Killed message -> send_event writer (Batch_killed { batch_id = batch.id; message }))
 
-let watch_batch writer batch =
-  let events = add_watcher batch in
-  watch_stream writer batch events
+let watch_batch writer batch ~download =
+  let watcher = add_watcher batch ~download in
+  watch_stream writer batch watcher
 
 let handle_client state sw flow _addr =
   let reader = Buf_read.of_flow flow ~max_size:Protocol_limits.max_json_line_size in
@@ -407,19 +516,26 @@ let handle_client state sw flow _addr =
   | Submit submit_request -> (
       match handle_submit state sw submit_request with
       | Error message -> send_event writer (Batch_failed { batch_id = ""; message })
-      | Ok (batch, events) ->
+      | Ok (batch, watcher) ->
           if submit_request.detach then send_event writer (accepted_event batch)
           else
-            match events with
+            match watcher with
             | None -> assert false
-            | Some events -> watch_stream writer batch events)
-  | Reconnect { batch_id } -> (
+            | Some watcher -> watch_stream writer batch watcher)
+  | Reconnect { batch_id; download } -> (
       match Hashtbl.find_opt state.batches batch_id with
-      | None ->
-          send_event writer
-            (Batch_failed
-               { batch_id; message = "unknown job id; queued jobs are only kept in server memory" })
-      | Some batch -> watch_batch writer batch)
+      | None -> (
+          match batch_of_reconnect_folder state batch_id with
+          | Ok batch -> watch_batch writer batch ~download
+          | Error message ->
+              send_event writer
+                (Batch_failed
+                   {
+                     batch_id;
+                     message =
+                       "unknown job id and could not import output folder: " ^ message;
+                   }))
+      | Some batch -> watch_batch writer batch ~download)
   | Kill { batch_id } -> send_event writer (kill_batch state batch_id)
 
 let parse_positive name value =
@@ -508,6 +624,7 @@ let () =
       running = 0;
       reserved_memory = 0;
       batches = Hashtbl.create 64;
+      folder_batches = Hashtbl.create 64;
       wake_scheduler = Eio.Condition.create ();
       log_server;
     }
