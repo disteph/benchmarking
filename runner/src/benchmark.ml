@@ -13,6 +13,7 @@ let cores_was_used = ref None
 let reconnect = ref None
 let kill = ref None
 let download = ref None
+let state_view = ref false
 let server_benchmark_root = ref None
 let server_exe_root = ref None
 
@@ -109,6 +110,7 @@ let print_event = function
       Printf.eprintf "%s: %s\n%!" prefix message
   | Protocol.Batch_killed { batch_id; message } ->
       Printf.printf "killed %s: %s\n%!" batch_id message
+  | Protocol.State_snapshot _ -> ()
 
 let progress_section ?bar_width ~color ~label total =
   let open Progress in
@@ -147,6 +149,71 @@ let print_final_event = function
   | Protocol.Batch_killed { batch_id; message } ->
       Printf.printf "killed %s: %s\n%!" batch_id message
   | event -> print_event event
+
+let terminal_width () =
+  match Terminal.Size.get_columns () with
+  | Some width when width >= 40 -> width
+  | _ -> 80
+
+let fit_to_width width s =
+  let len = String.length s in
+  if len = width then s
+  else if len < width then s ^ String.make (width - len) ' '
+  else String.sub s 0 width
+
+let ellipsize width s =
+  let len = String.length s in
+  if len <= width then s
+  else if width <= 3 then String.sub s 0 (max 0 width)
+  else String.sub s 0 (width - 3) ^ "..."
+
+let render_batch_summary width (batch : Protocol.batch_summary) =
+  let total = max 1 batch.total_jobs in
+  let completed = max 0 (min batch.completed batch.total_jobs) in
+  let pct = (completed * 100) / total in
+  let status =
+    if batch.running_jobs > 0 then Format.sprintf "%d running" batch.running_jobs
+    else if batch.queued_jobs > 0 then "queued"
+    else "waiting"
+  in
+  let suffix =
+    Format.sprintf " %d/%d jobs %3d%% | %db %ds x%d | q%d r%d %s"
+      completed batch.total_jobs pct batch.total_benchmarks batch.total_solvers
+      batch.generations batch.queued_jobs batch.running_jobs status
+  in
+  let raw_prefix = Format.sprintf "%s %s" batch.batch_id batch.benchmark_name in
+  let min_bar_width = 10 in
+  let prefix_width = max 0 (width - String.length suffix - min_bar_width - 3) in
+  let prefix = ellipsize prefix_width raw_prefix in
+  let bar_width = max 1 (width - String.length prefix - String.length suffix - 3) in
+  let filled = if batch.total_jobs <= 0 then 0 else (bar_width * completed) / batch.total_jobs in
+  let empty = bar_width - filled in
+  fit_to_width width
+    (Format.sprintf "%s [%s%s]%s" prefix (String.make filled '#') (String.make empty '.')
+       suffix)
+
+let render_state_snapshot previous_lines batches =
+  let width = terminal_width () in
+  let lines =
+    match batches with
+    | [] -> [ fit_to_width width "queue empty" ]
+    | batches -> List.map (render_batch_summary width) batches
+  in
+  if Unix.isatty Unix.stdout then (
+    let old_lines = !previous_lines in
+    let new_lines = List.length lines in
+    if old_lines > 0 then Printf.printf "\027[%dA%!" old_lines;
+    let rows = max old_lines new_lines in
+    for i = 0 to rows - 1 do
+      let line = if i < new_lines then List.nth lines i else "" in
+      Printf.printf "\r\027[2K%s\n%!" line
+    done;
+    if old_lines > new_lines then Printf.printf "\027[%dA%!" (old_lines - new_lines);
+    previous_lines := new_lines)
+  else (
+    List.iter print_endline lines;
+    print_endline "";
+    flush stdout)
 
 let ensure_local_output_dir local_output_dir server_output_dir =
   match !local_output_dir with
@@ -200,6 +267,7 @@ let wait_with_progress reader ~download_outputs ~local_output_dir ~initial_prior
       | Protocol.Output_file { name; contents; _ } ->
           if download_outputs then write_output_file local_output_dir ~name ~contents;
           loop ()
+      | Protocol.State_snapshot _ -> loop ()
       | Protocol.Job_finished { completed = new_completed; _ } ->
           apply_completed update_progress new_completed;
           loop ()
@@ -259,6 +327,27 @@ let submit ~detach_after_accept ~download_outputs request =
       if download_outputs then write_output_file local_output_dir ~name ~contents;
       wait_with_progress reader ~download_outputs ~local_output_dir ~initial_prior_completed:0
         ~prior_total:0 ~initial_completed:0 ~total:1
+  | Protocol.State_snapshot _ -> 1
+
+let show_state () =
+  let host, port = parse_server !server in
+  Eio_main.run @@ fun env ->
+  Eio.Net.with_tcp_connect ~host ~service:(string_of_int port) (Stdenv.net env) @@ fun flow ->
+  let reader = Buf_read.of_flow flow ~max_size:Protocol_limits.max_json_line_size in
+  Buf_write.with_flow flow @@ fun writer ->
+  send_line writer (Protocol.encode_request Protocol.State);
+  let previous_lines = ref 0 in
+  let rec loop () =
+    match Buf_read.line reader |> Protocol.decode_event with
+    | Protocol.State_snapshot { batches } ->
+        render_state_snapshot previous_lines batches;
+        loop ()
+    | Protocol.Batch_failed { batch_id; message } ->
+        print_event (Protocol.Batch_failed { batch_id; message });
+        1
+    | _ -> loop ()
+  in
+  loop ()
 
 let options =
   [
@@ -288,6 +377,7 @@ let options =
       Arg.String (fun id -> download := Some id),
       "Reconnect to an existing server job id or import a server-side result folder, then download \
        output files" );
+    ("-state", Arg.Set state_view, "Continuously display server queue state");
     ("-kill", Arg.String (fun id -> kill := Some id), "Kill an existing server job id");
   ]
 
@@ -298,7 +388,16 @@ let description =
 
 let () =
   Arg.parse options (fun a -> args := a :: !args) description;
-  match !reconnect, !download, !kill, List.rev !args with
+  let args = List.rev !args in
+  if !state_view then (
+    if Option.is_some !reconnect || Option.is_some !download || Option.is_some !kill || args <> []
+    then (
+      prerr_endline
+        "benchmark: -state is mutually exclusive with -reconnect, -download, -kill, and \
+         benchmark submission";
+      exit 2);
+    exit (show_state ()));
+  match !reconnect, !download, !kill, args with
   | Some _, Some _, _, _ ->
       prerr_endline "benchmark: -reconnect and -download are mutually exclusive";
       exit 2

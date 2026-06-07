@@ -8,7 +8,7 @@
 (executable
  (name benchmark)
  (public_name benchmark)
- (libraries containers eio eio_main progress runner_lib)
+ (libraries containers eio eio_main progress terminal unix runner_lib)
  (promote (until-clean) (into ".."))
  (modules benchmark)
 )

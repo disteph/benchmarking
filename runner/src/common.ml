@@ -376,7 +376,7 @@ let output_label : [ output | `Inconsistent ] -> string = function
   | `Memout -> "memout"
   | `Crash _ -> "crash"
 
-let hashtables_to_files_native out_path htbl sort =
+let hashtables_to_files_native ?(overwrite = false) out_path htbl sort =
   let out_seq = HStrings.to_seq htbl in
   let process (command, res) =
     let pp_pair fmt (instance, res) =
@@ -398,7 +398,8 @@ let hashtables_to_files_native out_path htbl sort =
       |> List.iter (pp_pair fmt)
     in
     let filename = Filename.concat out_path (command ^ ".csv") in
-    let ch = open_out_gen [ Open_wronly; Open_creat; Open_excl ] 0o640 filename in
+    let create_mode = if overwrite then Open_trunc else Open_excl in
+    let ch = open_out_gen [ Open_wronly; Open_creat; create_mode ] 0o640 filename in
     Fun.protect
       ~finally:(fun () -> close_out ch)
       (fun () ->

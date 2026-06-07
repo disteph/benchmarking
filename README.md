@@ -89,12 +89,16 @@ Common server options:
   Append server activity messages to a file. If `FILE` is relative, it is
   relative to the server process's current working directory. By default, no
   server log file is written; messages go to the server trace output.
+- `-state-file FILE`
+  JSON file used to persist batch ids, imported-folder mappings, queued work,
+  status, and completed aggregate results. If omitted, the default is
+  `benchmark-server-state.json` under `-output-root`.
 
-The server keeps its queue, live batch table, and imported-folder table in
-memory. If the server exits, queued/running job state and batch ids are lost,
-although files already written on the server disk remain there. A completed
-CSV result folder can be imported later with `benchmark -reconnect FOLDER` or
-`benchmark -download FOLDER`.
+State persistence is always enabled. On startup, the server reloads the state
+file if it exists. Finished and imported batches can be reconnected to by their
+old batch ids. Unfinished batches are requeued from the saved aggregate result
+counts; solver processes that were actually running at the moment of shutdown
+or crash are not resumed, so their benchmarks are run again.
 
 ## Submitting A Batch
 
@@ -156,6 +160,10 @@ Client options:
 - `-download JOB_ID_OR_FOLDER`
   Reconnect to an existing server-side batch id or import a result folder, then
   download output files when the reconnect finishes.
+- `-state`
+  Continuously display the server's current unfinished batches. The client
+  redraws one full-width progress line per batch until interrupted, including
+  total jobs, benchmark/solver/generation counts, and queued/running job counts.
 - `-kill JOB_ID`
   Kill a queued or running batch.
 
@@ -173,6 +181,7 @@ Path inputs are interpreted as follows:
 | --- | --- | --- |
 | server `-output-root DIR` | server | relative to the server process's current working directory |
 | server `-server-log FILE` | server | relative to the server process's current working directory |
+| server `-state-file FILE` | server | relative to the server process's current working directory |
 | client `BENCHMARK_LIST` argument | client | relative to the client process's current working directory |
 | client `-server-benchmark-root DIR` | server | relative to the server process's current working directory |
 | client `-server-exe-root DIR` | server | relative to the server process's current working directory |
@@ -237,6 +246,8 @@ Default path behavior summary:
 - server `-output-root` omitted: server uses `.` under the server process's
   current working directory
 - server `-server-log` omitted: no log file is opened
+- server `-state-file` omitted: server writes
+  `benchmark-server-state.json` under `-output-root`
 - client `-server-benchmark-root` omitted: client sends the benchmark list
   directory, made absolute on the client if necessary
 - client `-server-exe-root` omitted: client sends the client process's current
@@ -263,6 +274,18 @@ The client displays progress from server events:
 - a cyan `job` bar for this batch's own jobs
 
 If there are no prior jobs, only the cyan job bar is shown.
+
+Use `-state` for a continuous server-wide view:
+
+```sh
+benchmark -server 127.0.0.1:8765 -state
+```
+
+The state view subscribes to server updates and redraws one terminal-width
+progress bar per unfinished batch, including batches that are accepted but have
+not started yet. Batches are ordered from oldest to newest. Each line includes
+job progress, total benchmark/solver/generation counts, and queued/running job
+counts. It does not download files or attach to any single batch.
 
 ## Job IDs, Detach, And Reconnect
 
@@ -504,6 +527,12 @@ Reconnect later and download files:
 benchmark -server 127.0.0.1:8765 -download batch-000001
 ```
 
+Watch the whole server queue:
+
+```sh
+benchmark -server 127.0.0.1:8765 -state
+```
+
 Import an existing server result folder without downloading:
 
 ```sh
@@ -557,11 +586,13 @@ relative solver command `yices` is resolved under `/opt/solvers` on the server.
 
 ## Current Limitations
 
-- Queue state is in memory only.
 - There is no authentication.
 - The server executes arbitrary submitted commands as the server OS user.
 - `-generations 0` infinite mode is not supported in server mode.
-- Reconnect by batch id works only while the server process that knows that id
-  is still alive.
-- Reconnect by folder can recreate a finished batch id from CSV files, but it
-  cannot recover queued/running work.
+- State persistence is not a live process checkpoint: running solver processes
+  are lost on server exit and their unfinished jobs are requeued on restart.
+- State files are written by one server process. Do not run two benchmark
+  servers against the same `-state-file`.
+- Reconnect by folder can recreate a finished batch id from CSV files when no
+  state file is available, but folder import by itself cannot recover
+  queued/running work.

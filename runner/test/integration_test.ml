@@ -165,7 +165,7 @@ let run_capture ?cwd prog args =
   let _, status = Unix.waitpid [] pid in
   { status; output }
 
-let start_server ~server ~port ~output_root ~cores ?max_memory log_path =
+let start_server ~server ~port ~output_root ~cores ?max_memory ?state_file log_path =
   let log_fd =
     Unix.openfile log_path [ Unix.O_CREAT; Unix.O_TRUNC; Unix.O_WRONLY ] 0o600
   in
@@ -184,6 +184,13 @@ let start_server ~server ~port ~output_root ~cores ?max_memory log_path =
     match max_memory with
     | None -> []
     | Some memory -> [ "-max-memory"; memory ]
+  in
+  let args =
+    args
+    @
+    match state_file with
+    | None -> []
+    | Some path -> [ "-state-file"; path ]
   in
   let pid =
     Fun.protect
@@ -212,6 +219,32 @@ let wait_for_server port =
       loop ())
   in
   loop ()
+
+let read_line_from_fd fd =
+  let buffer = Buffer.create 256 in
+  let byte = Bytes.create 1 in
+  let rec loop () =
+    match Unix.read fd byte 0 1 with
+    | 0 -> fail "server closed connection before sending a line"
+    | _ ->
+        let c = Bytes.get byte 0 in
+        if c = '\n' then Buffer.contents buffer
+        else (
+          Buffer.add_char buffer c;
+          loop ())
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop ()
+  in
+  loop ()
+
+let request_first_event ~port request =
+  let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close sock)
+    (fun () ->
+      Unix.connect sock (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
+      let line = Runner_lib.Protocol.encode_request request ^ "\n" in
+      ignore (Unix.write_substring sock line 0 (String.length line));
+      read_line_from_fd sock |> Runner_lib.Protocol.decode_event)
 
 let stop_server pid =
   (try Unix.kill pid Sys.sigterm with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
@@ -253,6 +286,12 @@ let test_reconnect_download_conflict ~client ~client_cwd ~port =
   assert_exit "client -reconnect/-download rejection" 2 result;
   assert_bool "client -reconnect/-download message"
     (contains ~needle:"-reconnect and -download are mutually exclusive" result.output)
+
+let test_state_rejects_submission ~client ~client_cwd ~port list_path solver =
+  let result = run_client ~client ~client_cwd ~port [ "-state"; list_path; solver ] in
+  assert_exit "client -state submission rejection" 2 result;
+  assert_bool "client -state message"
+    (contains ~needle:"-state is mutually exclusive" result.output)
 
 let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_root list_path
     solver =
@@ -316,6 +355,37 @@ let test_running_reconnect_without_download ~client ~client_cwd ~port ~bench_roo
     (contains ~needle:("finished " ^ batch_id) reconnect.output);
   assert_bool "running reconnect without download should not download"
     (not (contains ~needle:"downloaded output files to " reconnect.output))
+
+let test_server_state_stream ~client ~client_cwd ~port ~bench_root ~exe_root list_path solver =
+  let detach =
+    run_client ~client ~client_cwd ~port
+      (with_server_roots ~bench_root ~exe_root [ "-timeout"; "20"; "-detach"; list_path; solver ])
+  in
+  assert_exit "state stream detach submit" 0 detach;
+  let batch_id = batch_id_of_output detach.output in
+  let event = request_first_event ~port Runner_lib.Protocol.State in
+  (match event with
+  | Runner_lib.Protocol.State_snapshot { batches } -> (
+      match
+        List.find_opt
+          (fun (b : Runner_lib.Protocol.batch_summary) -> b.batch_id = batch_id)
+          batches
+      with
+      | Some batch ->
+          assert_bool "state stream should report benchmark name"
+            (String.equal "benchmarks" batch.benchmark_name);
+          assert_bool "state stream should report benchmark count" (batch.total_benchmarks = 2);
+          assert_bool "state stream should report solver count" (batch.total_solvers = 1);
+          assert_bool "state stream should report generations" (batch.generations = 1);
+          assert_bool "state stream should report total jobs" (batch.total_jobs = 2);
+          assert_bool "state stream completed count should be bounded"
+            (batch.completed >= 0 && batch.completed <= batch.total_jobs);
+          assert_bool "state stream should include queued/running jobs"
+            (batch.queued_jobs + batch.running_jobs + batch.completed <= batch.total_jobs)
+      | None -> fail ("state stream missing batch " ^ batch_id))
+  | _ -> fail "state stream returned non-state event");
+  let killed = run_client ~client ~client_cwd ~port [ "-kill"; batch_id ] in
+  assert_exit "state stream cleanup kill" 0 killed
 
 let test_kill_batch ~client ~client_cwd ~port ~bench_root ~exe_root list_path solver =
   let detach =
@@ -518,7 +588,8 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
   assert_bool "imported spreadsheet should have Clashes worksheet"
     (contains ~needle:"<sheet name=\"Clashes\"" workbook);
   assert_bool "imported spreadsheet should include clashing benchmark"
-    (contains ~needle:"case-1.smt2" clashes)
+    (contains ~needle:"case-1.smt2" clashes);
+  batch_id
 
 let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
   let import_dir = Filename.concat root "absolute-imported-csvs" in
@@ -532,6 +603,83 @@ let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
   let dir = download_dir_of_output import.output in
   assert_files_exact dir [ "results.xlsx"; "solver_abs.csv" ];
   assert_csv_contains_sat dir "solver_abs"
+
+let test_state_restore_after_restart ~client ~client_cwd ~port ~batch_id ~imported_batch_id =
+  let restored = run_client ~client ~client_cwd ~port [ "-download"; batch_id ] in
+  assert_exit "state restore batch reconnect" 0 restored;
+  assert_bool "restored batch should keep batch id"
+    (contains ~needle:("finished " ^ batch_id) restored.output);
+  let restored_dir = download_dir_of_output restored.output in
+  assert_files_exact restored_dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
+  assert_csv_contains_sat restored_dir "sat_solver.sh";
+  let restored_import = run_client ~client ~client_cwd ~port [ "-download"; "imported-csvs" ] in
+  assert_exit "state restore imported folder reconnect" 0 restored_import;
+  let restored_import_id = batch_id_of_output restored_import.output in
+  assert_bool "restored folder mapping should reuse imported batch id"
+    (String.equal imported_batch_id restored_import_id);
+  let restored_import_dir = download_dir_of_output restored_import.output in
+  assert_files_exact restored_import_dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ]
+
+let test_state_restore_requeues_running_batch ~client ~server ~client_cwd ~bench_root
+    ~solver_dir root list_path =
+  let output_root = Filename.concat root "restore-running-output" in
+  let out_dir = Filename.concat output_root "restored-running" in
+  let state_file = Filename.concat output_root "state.json" in
+  let port = free_port () in
+  mkdir_p out_dir;
+  write_file state_file
+    (Printf.sprintf
+       {|
+{
+  "version": 1,
+  "next_batch": 1,
+  "batches": [
+    {
+      "sequence": 1,
+      "id": "batch-000001",
+      "request": {
+        "type": "submit",
+        "benchmark_file": %S,
+        "benchmark_name": "benchmarks",
+        "server_benchmark_root": %S,
+        "server_exe_root": %S,
+        "lines": ["sat-case-1.smt2"],
+        "commands": ["sat_solver.sh"],
+        "timeout": 5,
+        "memory": null,
+        "generations": 1,
+        "sort": "alpha",
+        "excel": true,
+        "detach": true
+      },
+      "out_dir": %S,
+      "total_jobs": 1,
+      "prior_jobs": 0,
+      "prior_completed": 0,
+      "completed": 0,
+      "status": {"status": "running"},
+      "results": []
+    }
+  ],
+  "folder_batches": []
+}
+|}
+       list_path bench_root solver_dir out_dir);
+  let server_log = Filename.concat root "restore-running-server.log" in
+  let server_pid =
+    start_server ~server ~port ~output_root ~cores:1 ~state_file server_log
+  in
+  Fun.protect
+    ~finally:(fun () -> stop_server server_pid)
+    (fun () ->
+      wait_for_server port;
+      let restored = run_client ~client ~client_cwd ~port [ "-download"; "batch-000001" ] in
+      assert_exit "running state restore reconnect" 0 restored;
+      assert_bool "running state restore should finish"
+        (contains ~needle:"finished batch-000001" restored.output);
+      let restored_dir = download_dir_of_output restored.output in
+      assert_files_exact restored_dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
+      assert_csv_contains_sat restored_dir "sat_solver.sh")
 
 let test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root =
   let empty_dir = Filename.concat server_root "empty-import" in
@@ -593,10 +741,14 @@ let () =
   write_file (Filename.concat bench_root "sat-case-1.smt2") "(set-logic QF_UF)\n";
   write_file (Filename.concat bench_root "sat-case-2.smt2") "(set-logic QF_UF)\n";
   test_server_accepts_terabyte_memory ~server root;
+  test_state_restore_requeues_running_batch ~client ~server ~client_cwd ~bench_root
+    ~solver_dir root list_path;
   let port = free_port () in
   let server_log = Filename.concat root "server.log" in
+  let state_file = Filename.concat server_root "server-state.json" in
   let server_pid =
-    start_server ~server ~port ~output_root:server_root ~cores:1 ~max_memory:"2G" server_log
+    start_server ~server ~port ~output_root:server_root ~cores:1 ~max_memory:"2G"
+      ~state_file server_log
   in
   Fun.protect
     ~finally:(fun () -> stop_server server_pid)
@@ -604,6 +756,7 @@ let () =
       wait_for_server port;
       test_client_cores_rejected ~client ~client_cwd list_path sat_solver;
       test_reconnect_download_conflict ~client ~client_cwd ~port;
+      test_state_rejects_submission ~client ~client_cwd ~port list_path "sat_solver.sh";
       let first_batch_id, first_dir =
         test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root
           ~exe_root:solver_dir list_path "sat_solver.sh"
@@ -617,6 +770,8 @@ let () =
         (starts_with ~prefix:(Filename.basename first_dir ^ "-run") (Filename.basename reconnect_dir));
       test_running_reconnect_without_download ~client ~client_cwd ~port ~bench_root
         ~exe_root:solver_dir list_path "slow_solver.sh";
+      test_server_state_stream ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir
+        list_path "slow_solver.sh";
       test_kill_batch ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir list_path
         "kill_solver.sh";
       test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
@@ -627,8 +782,21 @@ let () =
       test_timeout_classification ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir
         list_path "timeout_solver.sh";
       test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
-      test_reconnect_folder_import ~client ~client_cwd ~port ~server_root;
+      let imported_batch_id = test_reconnect_folder_import ~client ~client_cwd ~port ~server_root in
       test_reconnect_absolute_folder_import ~client ~client_cwd ~port root;
       test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root;
+      assert_bool "server state file should exist" (Sys.file_exists state_file);
+      stop_server server_pid;
+      let restarted_log = Filename.concat root "server-restarted.log" in
+      let restarted_pid =
+        start_server ~server ~port ~output_root:server_root ~cores:1 ~max_memory:"2G"
+          ~state_file restarted_log
+      in
+      Fun.protect
+        ~finally:(fun () -> stop_server restarted_pid)
+        (fun () ->
+          wait_for_server port;
+          test_state_restore_after_restart ~client ~client_cwd ~port ~batch_id:first_batch_id
+            ~imported_batch_id);
       test_server_output_collision server_root);
   print_endline "integration tests passed"

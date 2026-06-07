@@ -17,6 +17,20 @@ type request =
   | Submit of submit_request
   | Reconnect of { batch_id : string; download : bool }
   | Kill of { batch_id : string }
+  | State
+
+type batch_summary = {
+  batch_id : string;
+  benchmark_name : string;
+  output_dir : string;
+  total_benchmarks : int;
+  total_solvers : int;
+  generations : int;
+  total_jobs : int;
+  completed : int;
+  queued_jobs : int;
+  running_jobs : int;
+}
 
 type event =
   | Accepted of {
@@ -40,6 +54,7 @@ type event =
   | Batch_finished of { batch_id : string; output_dir : string }
   | Batch_failed of { batch_id : string; message : string }
   | Batch_killed of { batch_id : string; message : string }
+  | State_snapshot of { batches : batch_summary list }
 
 let base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
@@ -146,6 +161,8 @@ let reconnect_to_yojson batch_id download =
 let kill_to_yojson batch_id =
   `Assoc [ ("type", `String "kill"); ("batch_id", `String batch_id) ]
 
+let state_to_yojson = `Assoc [ ("type", `String "state") ]
+
 let submit_of_yojson = function
   | `Assoc fields ->
       if as_string (member "type" fields) <> "submit" then invalid_arg "expected submit";
@@ -175,6 +192,7 @@ let request_to_yojson = function
   | Submit request -> submit_to_yojson request
   | Reconnect { batch_id; download } -> reconnect_to_yojson batch_id download
   | Kill { batch_id } -> kill_to_yojson batch_id
+  | State -> state_to_yojson
 
 let request_of_yojson = function
   | `Assoc fields as json -> (
@@ -190,7 +208,56 @@ let request_of_yojson = function
                 | None -> false);
             }
       | "kill" -> Kill { batch_id = as_string (member "batch_id" fields) }
+      | "state" -> State
       | request_type -> invalid_arg ("unknown request: " ^ request_type))
+  | _ -> invalid_arg "expected JSON object"
+
+let batch_summary_to_yojson
+    {
+      batch_id;
+      benchmark_name;
+      output_dir;
+      total_benchmarks;
+      total_solvers;
+      generations;
+      total_jobs;
+      completed;
+      queued_jobs;
+      running_jobs;
+    } =
+  `Assoc
+    [
+      ("batch_id", `String batch_id);
+      ("benchmark_name", `String benchmark_name);
+      ("output_dir", `String output_dir);
+      ("total_benchmarks", `Int total_benchmarks);
+      ("total_solvers", `Int total_solvers);
+      ("generations", `Int generations);
+      ("total_jobs", `Int total_jobs);
+      ("completed", `Int completed);
+      ("queued_jobs", `Int queued_jobs);
+      ("running_jobs", `Int running_jobs);
+    ]
+
+let batch_summary_of_yojson = function
+  | `Assoc fields ->
+      let optional_int name default =
+        match List.assoc_opt name fields with
+        | Some value -> as_int value
+        | None -> default
+      in
+      {
+        batch_id = as_string (member "batch_id" fields);
+        benchmark_name = as_string (member "benchmark_name" fields);
+        output_dir = as_string (member "output_dir" fields);
+        total_benchmarks = optional_int "total_benchmarks" 0;
+        total_solvers = optional_int "total_solvers" 0;
+        generations = optional_int "generations" 0;
+        total_jobs = as_int (member "total_jobs" fields);
+        completed = as_int (member "completed" fields);
+        queued_jobs = optional_int "queued_jobs" 0;
+        running_jobs = optional_int "running_jobs" 0;
+      }
   | _ -> invalid_arg "expected JSON object"
 
 let event_to_yojson = function
@@ -252,6 +319,12 @@ let event_to_yojson = function
           ("event", `String "batch_killed");
           ("batch_id", `String batch_id);
           ("message", `String message);
+        ]
+  | State_snapshot { batches } ->
+      `Assoc
+        [
+          ("event", `String "state_snapshot");
+          ("batches", `List (List.map batch_summary_to_yojson batches));
         ]
 
 let event_of_yojson = function
@@ -318,6 +391,14 @@ let event_of_yojson = function
               batch_id = as_string (member "batch_id" fields);
               message = as_string (member "message" fields);
             }
+      | "state_snapshot" ->
+          State_snapshot
+            {
+              batches =
+                (match member "batches" fields with
+                | `List batches -> List.map batch_summary_of_yojson batches
+                | _ -> invalid_arg "expected JSON batch summary list");
+            }
       | event -> invalid_arg ("unknown event: " ^ event))
   | _ -> invalid_arg "expected JSON object"
 
@@ -327,6 +408,6 @@ let encode_submit r = encode_request (Submit r)
 let decode_submit s =
   match decode_request s with
   | Submit r -> r
-  | Reconnect _ | Kill _ -> invalid_arg "expected submit"
+  | Reconnect _ | Kill _ | State -> invalid_arg "expected submit"
 let encode_event e = Yojson.Safe.to_string (event_to_yojson e)
 let decode_event s = Yojson.Safe.from_string s |> event_of_yojson

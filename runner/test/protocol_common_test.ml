@@ -40,6 +40,7 @@ let test_submit_roundtrip () =
       assert_bool "excel" r.excel
   | Reconnect _ -> fail "decoded submit as reconnect"
   | Kill _ -> fail "decoded submit as kill"
+  | State -> fail "decoded submit as state"
 
 let test_reconnect_roundtrip () =
   match
@@ -51,6 +52,7 @@ let test_reconnect_roundtrip () =
       assert_bool "download" download
   | Kill _ -> fail "decoded reconnect as kill"
   | Submit _ -> fail "decoded reconnect as submit"
+  | State -> fail "decoded reconnect as state"
 
 let test_legacy_reconnect_defaults_no_download () =
   match Protocol.decode_request {|{"type":"reconnect","batch_id":"batch-000123"}|} with
@@ -59,12 +61,21 @@ let test_legacy_reconnect_defaults_no_download () =
       assert_bool "download default" (not download)
   | Kill _ -> fail "decoded reconnect as kill"
   | Submit _ -> fail "decoded reconnect as submit"
+  | State -> fail "decoded reconnect as state"
 
 let test_kill_roundtrip () =
   match Protocol.encode_request (Kill { batch_id = "batch-000123" }) |> Protocol.decode_request with
   | Kill { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
   | Submit _ -> fail "decoded kill as submit"
   | Reconnect _ -> fail "decoded kill as reconnect"
+  | State -> fail "decoded kill as state"
+
+let test_state_roundtrip () =
+  match Protocol.encode_request State |> Protocol.decode_request with
+  | State -> ()
+  | Submit _ -> fail "decoded state as submit"
+  | Reconnect _ -> fail "decoded state as reconnect"
+  | Kill _ -> fail "decoded state as kill"
 
 let test_event_roundtrip () =
   let events =
@@ -92,6 +103,24 @@ let test_event_roundtrip () =
       Batch_finished { batch_id = "batch-1"; output_dir = "/server/out" };
       Batch_failed { batch_id = "batch-1"; message = "failed" };
       Batch_killed { batch_id = "batch-1"; message = "killed" };
+      State_snapshot
+        {
+          batches =
+            [
+              {
+                batch_id = "batch-1";
+                benchmark_name = "benchmarks";
+                output_dir = "/server/out";
+                total_benchmarks = 2;
+                total_solvers = 5;
+                generations = 1;
+                total_jobs = 10;
+                completed = 3;
+                queued_jobs = 6;
+                running_jobs = 1;
+              };
+            ];
+        };
     ]
   in
   List.iter
@@ -148,6 +177,7 @@ let () =
   test_reconnect_roundtrip ();
   test_legacy_reconnect_defaults_no_download ();
   test_kill_roundtrip ();
+  test_state_roundtrip ();
   test_event_roundtrip ();
   test_base64_roundtrip ();
   test_fresh_output_dirs ();

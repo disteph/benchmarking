@@ -5,7 +5,7 @@
 
 (test
  (name integration_test)
- (libraries unix zip)
+ (libraries runner_lib unix zip)
  (deps
   (:client ../src/benchmark.exe)
   (:server ../src/benchmark_server.exe)
