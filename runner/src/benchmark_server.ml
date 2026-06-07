@@ -460,7 +460,8 @@ let finish_batch state batch =
       Common.hashtables_to_files_native ~overwrite:true batch.out_dir batch.htbl
         (result_sort batch);
       if batch.request.excel then
-        Common.hashtables_to_excel_native ~overwrite:true batch.out_dir batch.htbl Common.cmp_user;
+        Common.hashtables_to_excel_native ~timeout:batch.request.timeout ~overwrite:true
+          batch.out_dir batch.htbl Common.cmp_user;
       batch.log_done := true;
       Stream.add batch.log "";
       while not batch.log_closed do

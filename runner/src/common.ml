@@ -409,7 +409,7 @@ let hashtables_to_files_native ?(overwrite = false) out_path htbl sort =
   in
   Seq.iter process out_seq
 
-let hashtables_to_excel_native ?(overwrite = false) out_path htbl sort =
+let hashtables_to_excel_native ?timeout ?(overwrite = false) out_path htbl sort =
   let project command (instance, r) =
     match r with
     | `Answer (Unsat, { wall; user; system }) ->
@@ -458,7 +458,7 @@ let hashtables_to_excel_native ?(overwrite = false) out_path htbl sort =
   let filename = Filename.concat out_path "results.xlsx" in
   if (not overwrite) && Sys.file_exists filename then
     invalid_arg ("output file already exists: " ^ filename);
-  Excel.write_workbook filename (sheets, clashes)
+  Excel.write_workbook ?timeout filename (sheets, clashes)
 
 let sort_of_name = function
   | "alpha" -> cmp_alpha

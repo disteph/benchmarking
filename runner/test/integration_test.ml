@@ -491,21 +491,34 @@ let test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_ro
       "[Content_Types].xml";
       "_rels/.rels";
       "xl/_rels/workbook.xml.rels";
+      "xl/charts/chart1.xml";
+      "xl/charts/chart2.xml";
+      "xl/charts/chart3.xml";
+      "xl/drawings/_rels/drawing1.xml.rels";
+      "xl/drawings/drawing1.xml";
       "xl/workbook.xml";
+      "xl/worksheets/_rels/sheet1.xml.rels";
       "xl/worksheets/sheet1.xml";
       "xl/worksheets/sheet2.xml";
       "xl/worksheets/sheet3.xml";
       "xl/worksheets/sheet4.xml";
+      "xl/worksheets/sheet5.xml";
     ];
   let workbook = read_zip_entry xlsx_path "xl/workbook.xml" in
-  let totals = read_zip_entry xlsx_path "xl/worksheets/sheet1.xml" in
-  let clashes = read_zip_entry xlsx_path "xl/worksheets/sheet2.xml" in
-  let sheet3 = read_zip_entry xlsx_path "xl/worksheets/sheet3.xml" in
+  let chart_all = read_zip_entry xlsx_path "xl/charts/chart1.xml" in
+  let chart_unsat = read_zip_entry xlsx_path "xl/charts/chart2.xml" in
+  let chart_sat = read_zip_entry xlsx_path "xl/charts/chart3.xml" in
+  let plots = read_zip_entry xlsx_path "xl/worksheets/sheet1.xml" in
+  let totals = read_zip_entry xlsx_path "xl/worksheets/sheet2.xml" in
+  let clashes = read_zip_entry xlsx_path "xl/worksheets/sheet3.xml" in
   let sheet4 = read_zip_entry xlsx_path "xl/worksheets/sheet4.xml" in
+  let sheet5 = read_zip_entry xlsx_path "xl/worksheets/sheet5.xml" in
   assert_bool "results.xlsx should include mcsat suffix"
-    (contains ~needle:"same_stem.mcsat" sheet4);
+    (contains ~needle:"same_stem.mcsat" sheet5);
   assert_bool "results.xlsx should include cdclT suffix"
-    (contains ~needle:"same_stem.cdclT" sheet3);
+    (contains ~needle:"same_stem.cdclT" sheet4);
+  assert_bool "results.xlsx should have Plots worksheet"
+    (contains ~needle:"<sheet name=\"Plots\"" workbook);
   assert_bool "results.xlsx should have Totals worksheet"
     (contains ~needle:"<sheet name=\"Totals\"" workbook);
   assert_bool "results.xlsx should have Clashes worksheet"
@@ -518,6 +531,30 @@ let test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_ro
     (contains ~needle:"COUNTIF(Sheet1!C:C,&quot;unsat&quot;)" totals);
   assert_bool "results.xlsx should use whole time column in SUMIF"
     (contains ~needle:"SUMIF(Sheet1!C:C,&quot;sat&quot;,Sheet1!E:E)" totals);
+  assert_bool "results.xlsx should hide plot helper columns"
+    (contains ~needle:"<col min=\"24\" max=\"29\" hidden=\"1\"" plots);
+  assert_bool "results.xlsx should have combined plot"
+    (contains ~needle:"SAT+UNSAT solving time" chart_all);
+  assert_bool "combined plot should include first solver user times"
+    (contains ~needle:"Plots!$X$2:$X$2" chart_all);
+  assert_bool "combined plot should include second solver user times"
+    (contains ~needle:"Plots!$Y$2:$Y$2" chart_all);
+  assert_bool "combined plot should include hidden helper data"
+    (contains ~needle:"<c:plotVisOnly val=\"0\"/>" chart_all);
+  assert_bool "results.xlsx should have UNSAT-only plot"
+    (contains ~needle:"UNSAT solving time" chart_unsat);
+  assert_bool "UNSAT-only plot should include unsat solver user times"
+    (contains ~needle:"Plots!$Z$2:$Z$2" chart_unsat);
+  assert_bool "UNSAT-only plot should skip sat-only solver"
+    (not (contains ~needle:"Plots!$AA$2:$AA$2" chart_unsat));
+  assert_bool "results.xlsx should have SAT-only plot"
+    (contains ~needle:"SAT solving time" chart_sat);
+  assert_bool "SAT-only plot should include sat solver user times"
+    (contains ~needle:"Plots!$AC$2:$AC$2" chart_sat);
+  assert_bool "SAT-only plot should skip unsat-only solver"
+    (not (contains ~needle:"Plots!$AB$2:$AB$2" chart_sat));
+  assert_bool "results.xlsx should include timeout in plot axis"
+    (contains ~needle:"Solving time (seconds - log scale) 5s timeout" chart_all);
   assert_bool "results.xlsx should not use old HTML header"
     (not (contains ~needle:"<tr><th>Solver</th>" workbook));
   let worksheet_index name =
@@ -525,6 +562,8 @@ let test_solver_suffixes_preserved ~client ~client_cwd ~port ~bench_root ~exe_ro
     | Some i -> i
     | None -> fail ("missing worksheet " ^ name)
   in
+  assert_bool "Plots worksheet should be first"
+    (worksheet_index "Plots" < worksheet_index "Totals");
   assert_bool "Clashes worksheet should be after Totals"
     (worksheet_index "Totals" < worksheet_index "Clashes");
   assert_bool "Clashes worksheet should be before solver sheets"
@@ -582,11 +621,16 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
   assert_files_exact direct_dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ];
   let xlsx_path = Filename.concat dir "results.xlsx" in
   let workbook = read_zip_entry xlsx_path "xl/workbook.xml" in
-  let clashes = read_zip_entry xlsx_path "xl/worksheets/sheet2.xml" in
+  let chart = read_zip_entry xlsx_path "xl/charts/chart1.xml" in
+  let clashes = read_zip_entry xlsx_path "xl/worksheets/sheet3.xml" in
+  assert_bool "imported spreadsheet should have Plots worksheet"
+    (contains ~needle:"<sheet name=\"Plots\"" workbook);
   assert_bool "imported spreadsheet should have Totals worksheet"
     (contains ~needle:"<sheet name=\"Totals\"" workbook);
   assert_bool "imported spreadsheet should have Clashes worksheet"
     (contains ~needle:"<sheet name=\"Clashes\"" workbook);
+  assert_bool "imported spreadsheet should plot user times"
+    (contains ~needle:"Plots!$X$2:$X$2" chart);
   assert_bool "imported spreadsheet should include clashing benchmark"
     (contains ~needle:"case-1.smt2" clashes);
   batch_id
