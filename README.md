@@ -51,6 +51,7 @@ The harness includes:
 - reconnect with and without result download
 - detach and later reconnect
 - kill and reconnect-to-killed-batch behavior
+- pause, unpause, and reconnect-after-unpause behavior
 - reconnect by server-side result folder, including relative folders, absolute
   folders, duplicate imports, direct folder downloads, and empty-folder errors
 - server-side benchmark and executable roots for relative job paths
@@ -166,6 +167,10 @@ Client options:
   total jobs, benchmark/solver/generation counts, and queued/running job counts.
 - `-kill JOB_ID`
   Kill a queued or running batch.
+- `-pause JOB_ID`
+  Pause a queued or running batch without cancelling currently running jobs.
+- `-unpause JOB_ID`
+  Resume a paused batch.
 
 `-cores` is a server option. If passed to `benchmark`, the client exits with a
 migration message.
@@ -314,8 +319,8 @@ Reconnect behavior:
 
 Detached clients and killed clients do not receive output files at completion
 time, because there is no live TCP connection. Use `-reconnect JOB_ID` to view
-status, or `-download JOB_ID` to download files, as long as the
-server process is still alive.
+status, or `-download JOB_ID` to download files, as long as the server process
+is still alive.
 
 ### Reconnect By Batch Id
 
@@ -383,6 +388,27 @@ benchmark -server 127.0.0.1:8765 -kill batch-000001
 The server removes pending jobs for that batch and cancels running jobs. Killing
 a batch does not download files. Reconnecting to a killed batch reports the
 killed status.
+
+## Pausing A Batch
+
+Pause a queued or running batch by id:
+
+```sh
+benchmark -server 127.0.0.1:8765 -pause batch-000001
+```
+
+The server keeps the batch unfinished and does not cancel currently running
+jobs. Those jobs are allowed to finish normally, but queued jobs from the paused
+batch are not scheduled while the batch is paused.
+
+Resume the batch with:
+
+```sh
+benchmark -server 127.0.0.1:8765 -unpause batch-000001
+```
+
+Pausing and unpausing do not download files. Use `-reconnect JOB_ID` to wait for
+completion, or `-download JOB_ID` to download files when the batch finishes.
 
 ## Output Files
 

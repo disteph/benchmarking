@@ -40,6 +40,8 @@ let test_submit_roundtrip () =
       assert_bool "excel" r.excel
   | Reconnect _ -> fail "decoded submit as reconnect"
   | Kill _ -> fail "decoded submit as kill"
+  | Pause _ -> fail "decoded submit as pause"
+  | Unpause _ -> fail "decoded submit as unpause"
   | State -> fail "decoded submit as state"
 
 let test_reconnect_roundtrip () =
@@ -51,6 +53,8 @@ let test_reconnect_roundtrip () =
       assert_equal "batch_id" "batch-000123" batch_id;
       assert_bool "download" download
   | Kill _ -> fail "decoded reconnect as kill"
+  | Pause _ -> fail "decoded reconnect as pause"
+  | Unpause _ -> fail "decoded reconnect as unpause"
   | Submit _ -> fail "decoded reconnect as submit"
   | State -> fail "decoded reconnect as state"
 
@@ -60,6 +64,8 @@ let test_legacy_reconnect_defaults_no_download () =
       assert_equal "batch_id" "batch-000123" batch_id;
       assert_bool "download default" (not download)
   | Kill _ -> fail "decoded reconnect as kill"
+  | Pause _ -> fail "decoded reconnect as pause"
+  | Unpause _ -> fail "decoded reconnect as unpause"
   | Submit _ -> fail "decoded reconnect as submit"
   | State -> fail "decoded reconnect as state"
 
@@ -68,7 +74,31 @@ let test_kill_roundtrip () =
   | Kill { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
   | Submit _ -> fail "decoded kill as submit"
   | Reconnect _ -> fail "decoded kill as reconnect"
+  | Pause _ -> fail "decoded kill as pause"
+  | Unpause _ -> fail "decoded kill as unpause"
   | State -> fail "decoded kill as state"
+
+let test_pause_roundtrip () =
+  match
+    Protocol.encode_request (Pause { batch_id = "batch-000123" }) |> Protocol.decode_request
+  with
+  | Pause { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
+  | Submit _ -> fail "decoded pause as submit"
+  | Reconnect _ -> fail "decoded pause as reconnect"
+  | Kill _ -> fail "decoded pause as kill"
+  | Unpause _ -> fail "decoded pause as unpause"
+  | State -> fail "decoded pause as state"
+
+let test_unpause_roundtrip () =
+  match
+    Protocol.encode_request (Unpause { batch_id = "batch-000123" }) |> Protocol.decode_request
+  with
+  | Unpause { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
+  | Submit _ -> fail "decoded unpause as submit"
+  | Reconnect _ -> fail "decoded unpause as reconnect"
+  | Kill _ -> fail "decoded unpause as kill"
+  | Pause _ -> fail "decoded unpause as pause"
+  | State -> fail "decoded unpause as state"
 
 let test_state_roundtrip () =
   match Protocol.encode_request State |> Protocol.decode_request with
@@ -76,6 +106,8 @@ let test_state_roundtrip () =
   | Submit _ -> fail "decoded state as submit"
   | Reconnect _ -> fail "decoded state as reconnect"
   | Kill _ -> fail "decoded state as kill"
+  | Pause _ -> fail "decoded state as pause"
+  | Unpause _ -> fail "decoded state as unpause"
 
 let test_event_roundtrip () =
   let events =
@@ -103,6 +135,8 @@ let test_event_roundtrip () =
       Batch_finished { batch_id = "batch-1"; output_dir = "/server/out" };
       Batch_failed { batch_id = "batch-1"; message = "failed" };
       Batch_killed { batch_id = "batch-1"; message = "killed" };
+      Batch_paused { batch_id = "batch-1"; message = "paused" };
+      Batch_unpaused { batch_id = "batch-1"; message = "unpaused" };
       State_snapshot
         {
           batches =
@@ -118,6 +152,7 @@ let test_event_roundtrip () =
                 completed = 3;
                 queued_jobs = 6;
                 running_jobs = 1;
+                paused = true;
               };
             ];
         };
@@ -128,6 +163,16 @@ let test_event_roundtrip () =
       let decoded = Protocol.encode_event event |> Protocol.decode_event in
       if decoded <> event then fail "event roundtrip changed value")
     events
+
+let test_legacy_state_snapshot_defaults_unpaused () =
+  match
+    Protocol.decode_event
+      {|{"event":"state_snapshot","batches":[{"batch_id":"batch-1","benchmark_name":"benchmarks","output_dir":"/server/out","total_jobs":10,"completed":3}]}|}
+  with
+  | State_snapshot { batches = [ batch ] } ->
+      assert_bool "legacy state snapshot defaults to unpaused" (not batch.paused)
+  | State_snapshot _ -> fail "legacy state snapshot decoded wrong batch count"
+  | _ -> fail "legacy state snapshot decoded as non-state event"
 
 let test_base64_roundtrip () =
   let binary = String.init 256 Char.chr in
@@ -177,8 +222,11 @@ let () =
   test_reconnect_roundtrip ();
   test_legacy_reconnect_defaults_no_download ();
   test_kill_roundtrip ();
+  test_pause_roundtrip ();
+  test_unpause_roundtrip ();
   test_state_roundtrip ();
   test_event_roundtrip ();
+  test_legacy_state_snapshot_defaults_unpaused ();
   test_base64_roundtrip ();
   test_fresh_output_dirs ();
   test_safe_output_file_names ();

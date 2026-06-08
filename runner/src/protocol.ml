@@ -17,6 +17,8 @@ type request =
   | Submit of submit_request
   | Reconnect of { batch_id : string; download : bool }
   | Kill of { batch_id : string }
+  | Pause of { batch_id : string }
+  | Unpause of { batch_id : string }
   | State
 
 type batch_summary = {
@@ -30,6 +32,7 @@ type batch_summary = {
   completed : int;
   queued_jobs : int;
   running_jobs : int;
+  paused : bool;
 }
 
 type event =
@@ -54,6 +57,8 @@ type event =
   | Batch_finished of { batch_id : string; output_dir : string }
   | Batch_failed of { batch_id : string; message : string }
   | Batch_killed of { batch_id : string; message : string }
+  | Batch_paused of { batch_id : string; message : string }
+  | Batch_unpaused of { batch_id : string; message : string }
   | State_snapshot of { batches : batch_summary list }
 
 let base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -161,6 +166,12 @@ let reconnect_to_yojson batch_id download =
 let kill_to_yojson batch_id =
   `Assoc [ ("type", `String "kill"); ("batch_id", `String batch_id) ]
 
+let pause_to_yojson batch_id =
+  `Assoc [ ("type", `String "pause"); ("batch_id", `String batch_id) ]
+
+let unpause_to_yojson batch_id =
+  `Assoc [ ("type", `String "unpause"); ("batch_id", `String batch_id) ]
+
 let state_to_yojson = `Assoc [ ("type", `String "state") ]
 
 let submit_of_yojson = function
@@ -192,6 +203,8 @@ let request_to_yojson = function
   | Submit request -> submit_to_yojson request
   | Reconnect { batch_id; download } -> reconnect_to_yojson batch_id download
   | Kill { batch_id } -> kill_to_yojson batch_id
+  | Pause { batch_id } -> pause_to_yojson batch_id
+  | Unpause { batch_id } -> unpause_to_yojson batch_id
   | State -> state_to_yojson
 
 let request_of_yojson = function
@@ -208,6 +221,8 @@ let request_of_yojson = function
                 | None -> false);
             }
       | "kill" -> Kill { batch_id = as_string (member "batch_id" fields) }
+      | "pause" -> Pause { batch_id = as_string (member "batch_id" fields) }
+      | "unpause" -> Unpause { batch_id = as_string (member "batch_id" fields) }
       | "state" -> State
       | request_type -> invalid_arg ("unknown request: " ^ request_type))
   | _ -> invalid_arg "expected JSON object"
@@ -224,6 +239,7 @@ let batch_summary_to_yojson
       completed;
       queued_jobs;
       running_jobs;
+      paused;
     } =
   `Assoc
     [
@@ -237,6 +253,7 @@ let batch_summary_to_yojson
       ("completed", `Int completed);
       ("queued_jobs", `Int queued_jobs);
       ("running_jobs", `Int running_jobs);
+      ("paused", `Bool paused);
     ]
 
 let batch_summary_of_yojson = function
@@ -257,6 +274,10 @@ let batch_summary_of_yojson = function
         completed = as_int (member "completed" fields);
         queued_jobs = optional_int "queued_jobs" 0;
         running_jobs = optional_int "running_jobs" 0;
+        paused =
+          (match List.assoc_opt "paused" fields with
+          | Some value -> as_bool value
+          | None -> false);
       }
   | _ -> invalid_arg "expected JSON object"
 
@@ -317,6 +338,20 @@ let event_to_yojson = function
       `Assoc
         [
           ("event", `String "batch_killed");
+          ("batch_id", `String batch_id);
+          ("message", `String message);
+        ]
+  | Batch_paused { batch_id; message } ->
+      `Assoc
+        [
+          ("event", `String "batch_paused");
+          ("batch_id", `String batch_id);
+          ("message", `String message);
+        ]
+  | Batch_unpaused { batch_id; message } ->
+      `Assoc
+        [
+          ("event", `String "batch_unpaused");
           ("batch_id", `String batch_id);
           ("message", `String message);
         ]
@@ -391,6 +426,18 @@ let event_of_yojson = function
               batch_id = as_string (member "batch_id" fields);
               message = as_string (member "message" fields);
             }
+      | "batch_paused" ->
+          Batch_paused
+            {
+              batch_id = as_string (member "batch_id" fields);
+              message = as_string (member "message" fields);
+            }
+      | "batch_unpaused" ->
+          Batch_unpaused
+            {
+              batch_id = as_string (member "batch_id" fields);
+              message = as_string (member "message" fields);
+            }
       | "state_snapshot" ->
           State_snapshot
             {
@@ -408,6 +455,6 @@ let encode_submit r = encode_request (Submit r)
 let decode_submit s =
   match decode_request s with
   | Submit r -> r
-  | Reconnect _ | Kill _ | State -> invalid_arg "expected submit"
+  | Reconnect _ | Kill _ | Pause _ | Unpause _ | State -> invalid_arg "expected submit"
 let encode_event e = Yojson.Safe.to_string (event_to_yojson e)
 let decode_event s = Yojson.Safe.from_string s |> event_of_yojson

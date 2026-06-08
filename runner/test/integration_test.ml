@@ -93,6 +93,17 @@ let read_file path =
     ~finally:(fun () -> close_in ch)
     (fun () -> really_input_string ch (in_channel_length ch))
 
+let wait_until msg f =
+  let deadline = Unix.gettimeofday () +. 5.0 in
+  let rec loop () =
+    if f () then ()
+    else if Unix.gettimeofday () > deadline then fail msg
+    else (
+      Unix.sleepf 0.05;
+      loop ())
+  in
+  loop ()
+
 let read_zip_entry path name =
   let zf = Zip.open_in path in
   Fun.protect
@@ -402,6 +413,40 @@ let test_kill_batch ~client ~client_cwd ~port ~bench_root ~exe_root list_path so
   let reconnect = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id ] in
   assert_exit "reconnect killed batch" 0 reconnect;
   assert_bool "reconnect killed message" (contains ~needle:("killed " ^ batch_id) reconnect.output)
+
+let test_pause_batch ~client ~client_cwd ~port ~bench_root ~exe_root =
+  let list_path = Filename.concat client_cwd "pause-list.txt" in
+  write_file list_path "pause-case-1.smt2\npause-case-2.smt2\npause-case-3.smt2\n";
+  List.iter
+    (fun name -> write_file (Filename.concat bench_root name) "(set-logic QF_UF)\n")
+    [ "pause-case-1.smt2"; "pause-case-2.smt2"; "pause-case-3.smt2" ];
+  let marker = Filename.concat client_cwd "pause-started.txt" in
+  let pause_solver = Filename.concat exe_root "pause_solver.sh" in
+  make_solver pause_solver (Printf.sprintf "echo start >> %s\nsleep 2\necho sat\n" marker);
+  let detach =
+    run_client ~client ~client_cwd ~port
+      (with_server_roots ~bench_root ~exe_root
+         [ "-timeout"; "10"; "-detach"; list_path; "pause_solver.sh" ])
+  in
+  assert_exit "pause detach submit" 0 detach;
+  let batch_id = batch_id_of_output detach.output in
+  wait_until "pause test first job did not start" (fun () ->
+      Sys.file_exists marker && count_occurrences ~needle:"start\n" (read_file marker) >= 1);
+  let paused = run_client ~client ~client_cwd ~port [ "-pause"; batch_id ] in
+  assert_exit "pause batch" 0 paused;
+  assert_bool "pause message" (contains ~needle:("paused " ^ batch_id) paused.output);
+  Unix.sleepf 2.5;
+  let started_while_paused = count_occurrences ~needle:"start\n" (read_file marker) in
+  assert_bool "pause should not start another job" (started_while_paused = 1);
+  let unpaused = run_client ~client ~client_cwd ~port [ "-unpause"; batch_id ] in
+  assert_exit "unpause batch" 0 unpaused;
+  assert_bool "unpause message" (contains ~needle:("unpaused " ^ batch_id) unpaused.output);
+  let reconnect = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id ] in
+  assert_exit "reconnect unpaused batch" 0 reconnect;
+  assert_bool "unpaused batch should finish"
+    (contains ~needle:("finished " ^ batch_id) reconnect.output);
+  assert_bool "unpaused batch should run all jobs"
+    (count_occurrences ~needle:"start\n" (read_file marker) = 3)
 
 let test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_root =
   let list_dir = Filename.concat client_cwd "relative-list" in
@@ -818,6 +863,7 @@ let () =
         list_path "slow_solver.sh";
       test_kill_batch ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir list_path
         "kill_solver.sh";
+      test_pause_batch ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
       test_server_root_relative_paths ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
       test_absolute_server_paths ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir;
       test_memory_rejection ~client ~client_cwd ~port ~bench_root ~exe_root:solver_dir list_path

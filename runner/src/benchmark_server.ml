@@ -35,6 +35,7 @@ and batch = {
 
 and batch_status =
   | Running
+  | Paused
   | Finished
   | Failed of string
   | Killed of string
@@ -185,6 +186,7 @@ let results_of_yojson json =
 
 let status_to_yojson = function
   | Running -> `Assoc [ ("status", `String "running") ]
+  | Paused -> `Assoc [ ("status", `String "paused") ]
   | Finished -> `Assoc [ ("status", `String "finished") ]
   | Failed message -> `Assoc [ ("status", `String "failed"); ("message", `String message) ]
   | Killed message -> `Assoc [ ("status", `String "killed"); ("message", `String message) ]
@@ -193,6 +195,7 @@ let status_of_yojson = function
   | `Assoc fields -> (
       match json_string (json_member "status" fields) with
       | "running" -> Running
+      | "paused" -> Paused
       | "finished" -> Finished
       | "failed" -> Failed (json_string (json_member "message" fields))
       | "killed" -> Killed (json_string (json_member "message" fields))
@@ -219,7 +222,7 @@ let batch_of_yojson = function
       let status = status_of_yojson (json_member "status" fields) in
       let running =
         match status with
-        | Running -> true
+        | Running | Paused -> true
         | Finished | Failed _ | Killed _ -> false
       in
       {
@@ -329,7 +332,7 @@ let unfinished_batch_summaries state =
   Hashtbl.to_seq_values state.batches |> List.of_seq
   |> List.filter (fun batch ->
          match batch.status with
-         | Running -> true
+         | Running | Paused -> true
          | Finished | Failed _ | Killed _ -> false)
   |> List.sort (fun a b -> Int.compare a.sequence b.sequence)
   |> List.map (fun batch : Protocol.batch_summary ->
@@ -344,6 +347,7 @@ let unfinished_batch_summaries state =
            completed = batch.completed;
            queued_jobs = queued_jobs batch;
            running_jobs = List.length !(batch.running_switches);
+           paused = (match batch.status with Paused -> true | _ -> false);
          })
 
 let state_snapshot_event state =
@@ -389,6 +393,7 @@ let send_output_files writer batch =
 let unfinished_jobs batch =
   match batch.status with
   | Running -> max 0 (batch.total_jobs - batch.completed)
+  | Paused -> List.length !(batch.running_switches)
   | Finished | Failed _ | Killed _ -> 0
 
 let prior_jobs state =
@@ -443,6 +448,7 @@ let resources_fit state job =
 let take_runnable state =
   let rec aux prefix = function
     | [] -> None
+    | job :: rest when job.batch.status = Paused -> aux (job :: prefix) rest
     | job :: rest when resources_fit state job ->
         state.pending <- List.rev_append prefix rest;
         Some job
@@ -455,7 +461,7 @@ let result_sort batch = Common.sort_of_name batch.request.sort
 let finish_batch state batch =
   match batch.status with
   | Failed _ | Finished | Killed _ -> ()
-  | Running -> (
+  | Running | Paused -> (
     try
       Common.hashtables_to_files_native ~overwrite:true batch.out_dir batch.htbl
         (result_sort batch);
@@ -498,7 +504,7 @@ let run_job proc_mgr state job =
           ~log:batch.log [ solver; instance ]
       in
       match batch.status with
-      | Running ->
+      | Running | Paused ->
           let solver_name = Common.solver_output_name job.solver in
           Common.add_result ~htbl:batch.htbl ~nb_benchmarks:(List.length request.lines)
             solver_name job.benchmark result;
@@ -730,7 +736,7 @@ let kill_batch state batch_id =
           Batch_failed { batch_id; message = "batch already failed: " ^ message }
       | Killed message ->
           Batch_killed { batch_id; message }
-      | Running ->
+      | Running | Paused ->
           let removed = ref 0 in
           state.pending <-
             List.filter
@@ -754,6 +760,66 @@ let kill_batch state batch_id =
           Eio.Condition.broadcast state.wake_scheduler;
           state.log_server (Format.sprintf "killed %s: %s" batch_id message);
           Batch_killed { batch_id; message })
+
+let pending_jobs_for_batch state batch =
+  List.fold_left
+    (fun count job -> if job.batch == batch then count + 1 else count)
+    0 state.pending
+
+let pause_batch state batch_id =
+  match Hashtbl.find_opt state.batches batch_id with
+  | None ->
+      Batch_failed { batch_id; message = "unknown job id; queued jobs are only kept in server memory" }
+  | Some batch -> (
+      match batch.status with
+      | Finished ->
+          Batch_failed { batch_id; message = "batch already finished" }
+      | Failed message ->
+          Batch_failed { batch_id; message = "batch already failed: " ^ message }
+      | Killed message ->
+          Batch_failed { batch_id; message = "batch already killed: " ^ message }
+      | Paused ->
+          let message = "batch already paused" in
+          Batch_paused { batch_id; message }
+      | Running ->
+          let pending = pending_jobs_for_batch state batch in
+          let running = List.length !(batch.running_switches) in
+          let message =
+            Format.sprintf "paused with %d pending jobs and %d running jobs" pending running
+          in
+          batch.status <- Paused;
+          save_state state;
+          publish_state_snapshot state;
+          publish batch (Batch_paused { batch_id; message });
+          Eio.Condition.broadcast state.wake_scheduler;
+          state.log_server (Format.sprintf "paused %s: %s" batch_id message);
+          Batch_paused { batch_id; message })
+
+let unpause_batch state batch_id =
+  match Hashtbl.find_opt state.batches batch_id with
+  | None ->
+      Batch_failed { batch_id; message = "unknown job id; queued jobs are only kept in server memory" }
+  | Some batch -> (
+      match batch.status with
+      | Finished ->
+          Batch_failed { batch_id; message = "batch already finished" }
+      | Failed message ->
+          Batch_failed { batch_id; message = "batch already failed: " ^ message }
+      | Killed message ->
+          Batch_failed { batch_id; message = "batch already killed: " ^ message }
+      | Running ->
+          let message = "batch already running" in
+          Batch_unpaused { batch_id; message }
+      | Paused ->
+          let pending = pending_jobs_for_batch state batch in
+          let message = Format.sprintf "unpaused with %d pending jobs" pending in
+          batch.status <- Running;
+          save_state state;
+          publish_state_snapshot state;
+          publish batch (Batch_unpaused { batch_id; message });
+          Eio.Condition.broadcast state.wake_scheduler;
+          state.log_server (Format.sprintf "unpaused %s: %s" batch_id message);
+          Batch_unpaused { batch_id; message })
 
 let start_log_drain ?(append = false) sw batch =
   Fiber.fork_daemon ~sw (fun () ->
@@ -827,7 +893,7 @@ let restore_state state sw =
           batches
           |> List.filter (fun batch ->
                  match batch.status with
-                 | Running -> true
+                 | Running | Paused -> true
                  | Finished | Failed _ | Killed _ -> false)
           |> List.sort (fun a b -> Int.compare a.sequence b.sequence)
         in
@@ -867,7 +933,7 @@ let watch_stream writer batch watcher =
     (fun () ->
       send_event writer (accepted_event batch);
       match batch.status with
-      | Running -> drain_events writer watcher.events
+      | Running | Paused -> drain_events writer watcher.events
       | Finished ->
           if watcher.download then send_output_files writer batch;
           send_event writer
@@ -922,6 +988,8 @@ let handle_client state sw flow _addr =
                    }))
       | Some batch -> watch_batch writer batch ~download)
   | Kill { batch_id } -> send_event writer (kill_batch state batch_id)
+  | Pause { batch_id } -> send_event writer (pause_batch state batch_id)
+  | Unpause { batch_id } -> send_event writer (unpause_batch state batch_id)
   | State -> watch_state writer state
 
 let parse_positive name value =

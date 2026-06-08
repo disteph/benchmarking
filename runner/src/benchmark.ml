@@ -12,6 +12,8 @@ let server = ref (Sys.getenv_opt "BENCHMARK_SERVER" |> Option.value ~default:"12
 let cores_was_used = ref None
 let reconnect = ref None
 let kill = ref None
+let pause = ref None
+let unpause = ref None
 let download = ref None
 let state_view = ref false
 let server_benchmark_root = ref None
@@ -110,6 +112,10 @@ let print_event = function
       Printf.eprintf "%s: %s\n%!" prefix message
   | Protocol.Batch_killed { batch_id; message } ->
       Printf.printf "killed %s: %s\n%!" batch_id message
+  | Protocol.Batch_paused { batch_id; message } ->
+      Printf.printf "paused %s: %s\n%!" batch_id message
+  | Protocol.Batch_unpaused { batch_id; message } ->
+      Printf.printf "unpaused %s: %s\n%!" batch_id message
   | Protocol.State_snapshot _ -> ()
 
 let progress_section ?bar_width ~color ~label total =
@@ -148,6 +154,10 @@ let print_final_event = function
       Printf.eprintf "%s: %s\n%!" prefix message
   | Protocol.Batch_killed { batch_id; message } ->
       Printf.printf "killed %s: %s\n%!" batch_id message
+  | Protocol.Batch_paused { batch_id; message } ->
+      Printf.printf "paused %s: %s\n%!" batch_id message
+  | Protocol.Batch_unpaused { batch_id; message } ->
+      Printf.printf "unpaused %s: %s\n%!" batch_id message
   | event -> print_event event
 
 let terminal_width () =
@@ -172,7 +182,8 @@ let render_batch_summary width (batch : Protocol.batch_summary) =
   let completed = max 0 (min batch.completed batch.total_jobs) in
   let pct = (completed * 100) / total in
   let status =
-    if batch.running_jobs > 0 then Format.sprintf "%d running" batch.running_jobs
+    if batch.paused then "paused"
+    else if batch.running_jobs > 0 then Format.sprintf "%d running" batch.running_jobs
     else if batch.queued_jobs > 0 then "queued"
     else "waiting"
   in
@@ -276,6 +287,7 @@ let wait_with_progress reader ~download_outputs ~local_output_dir ~initial_prior
           (0, event)
       | Protocol.Batch_failed _ -> (1, event)
       | Protocol.Batch_killed _ -> (0, event)
+      | Protocol.Batch_paused _ | Protocol.Batch_unpaused _ -> loop ()
       | Protocol.Accepted
           {
             completed = new_completed;
@@ -317,6 +329,8 @@ let submit ~detach_after_accept ~download_outputs request =
   | Protocol.Batch_finished _ -> 0
   | Protocol.Batch_failed _ -> 1
   | Protocol.Batch_killed _ -> 0
+  | Protocol.Batch_paused _ -> 0
+  | Protocol.Batch_unpaused _ -> 0
   | Protocol.Job_finished { completed; total; _ } ->
       wait_with_progress reader ~download_outputs ~local_output_dir ~initial_prior_completed:0
         ~prior_total:0 ~initial_completed:completed ~total
@@ -379,6 +393,8 @@ let options =
        output files" );
     ("-state", Arg.Set state_view, "Continuously display server queue state");
     ("-kill", Arg.String (fun id -> kill := Some id), "Kill an existing server job id");
+    ("-pause", Arg.String (fun id -> pause := Some id), "Pause an existing server job id");
+    ("-unpause", Arg.String (fun id -> unpause := Some id), "Unpause an existing server job id");
   ]
 
 let description =
@@ -389,44 +405,69 @@ let description =
 let () =
   Arg.parse options (fun a -> args := a :: !args) description;
   let args = List.rev !args in
+  let selected_actions =
+    List.filter_map
+      (fun action -> action)
+      [
+        Option.map (fun id -> (`Reconnect, id)) !reconnect;
+        Option.map (fun id -> (`Download, id)) !download;
+        Option.map (fun id -> (`Kill, id)) !kill;
+        Option.map (fun id -> (`Pause, id)) !pause;
+        Option.map (fun id -> (`Unpause, id)) !unpause;
+      ]
+  in
   if !state_view then (
-    if Option.is_some !reconnect || Option.is_some !download || Option.is_some !kill || args <> []
-    then (
+    if selected_actions <> [] || args <> [] then (
       prerr_endline
-        "benchmark: -state is mutually exclusive with -reconnect, -download, -kill, and \
-         benchmark submission";
+        "benchmark: -state is mutually exclusive with -reconnect, -download, -kill, -pause, \
+         -unpause, and benchmark submission";
       exit 2);
     exit (show_state ()));
-  match !reconnect, !download, !kill, args with
-  | Some _, Some _, _, _ ->
+  (match !reconnect, !download, !kill, !pause, !unpause with
+  | Some _, Some _, _, _, _ ->
       prerr_endline "benchmark: -reconnect and -download are mutually exclusive";
       exit 2
-  | Some _, None, Some _, _ ->
+  | Some _, None, Some _, _, _ ->
       prerr_endline "benchmark: -reconnect and -kill are mutually exclusive";
       exit 2
-  | None, Some _, Some _, _ ->
+  | None, Some _, Some _, _, _ ->
       prerr_endline "benchmark: -download and -kill are mutually exclusive";
       exit 2
-  | Some batch_id, None, None, [] ->
+  | _ when List.length selected_actions > 1 ->
+      prerr_endline
+        "benchmark: -reconnect, -download, -kill, -pause, and -unpause are mutually exclusive";
+      exit 2
+  | _ -> ());
+  match selected_actions, args with
+  | [ (`Reconnect, batch_id) ], [] ->
       exit
         (submit ~detach_after_accept:false ~download_outputs:false
            (Protocol.Reconnect { batch_id; download = false }))
-  | None, Some batch_id, None, [] ->
+  | [ (`Download, batch_id) ], [] ->
       exit
         (submit ~detach_after_accept:false ~download_outputs:true
            (Protocol.Reconnect { batch_id; download = true }))
-  | Some _, None, None, _ ->
-      prerr_endline "benchmark: -reconnect does not take a benchmark file or solver command";
-      exit 2
-  | None, Some _, None, _ ->
-      prerr_endline "benchmark: -download does not take a benchmark file or solver command";
-      exit 2
-  | None, None, Some batch_id, [] ->
+  | [ (`Kill, batch_id) ], [] ->
       exit (submit ~detach_after_accept:false ~download_outputs:false (Protocol.Kill { batch_id }))
-  | None, None, Some _, _ ->
-      prerr_endline "benchmark: -kill does not take a benchmark file or solver command";
+  | [ (`Pause, batch_id) ], [] ->
+      exit (submit ~detach_after_accept:false ~download_outputs:false (Protocol.Pause { batch_id }))
+  | [ (`Unpause, batch_id) ], [] ->
+      exit
+        (submit ~detach_after_accept:false ~download_outputs:false
+           (Protocol.Unpause { batch_id }))
+  | [ (action, _) ], _ ->
+      let name =
+        match action with
+        | `Reconnect -> "reconnect"
+        | `Download -> "download"
+        | `Kill -> "kill"
+        | `Pause -> "pause"
+        | `Unpause -> "unpause"
+      in
+      prerr_endline
+        ("benchmark: -" ^ name ^ " does not take a benchmark file or solver command");
       exit 2
-  | None, None, None, benchmark_file :: commands ->
+  | [], benchmark_file :: commands ->
       validate_input benchmark_file commands;
       let lines = CCIO.(with_in benchmark_file read_lines_l) in
       if lines = [] then (
@@ -452,5 +493,6 @@ let () =
       exit
         (submit ~detach_after_accept:!detach ~download_outputs:true
            (Protocol.Submit request))
-  | None, None, None, _ ->
+  | [], _ ->
       Printf.printf "%s\n" (Arg.usage_string options "Usage: benchmark [options] BENCHMARK_FILE COMMAND...")
+  | _ -> assert false
