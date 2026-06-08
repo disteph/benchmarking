@@ -94,12 +94,17 @@ Common server options:
   JSON file used to persist batch ids, imported-folder mappings, queued work,
   status, and completed aggregate results. If omitted, the default is
   `benchmark-server-state.json` under `-output-root`.
+- `-state-save-interval SECONDS`
+  Minimum interval between result checkpoint writes while jobs are completing.
+  Default is `30`. Submits, pause/kill/unpause operations, and batch completion
+  still force a state write.
 
 State persistence is always enabled. On startup, the server reloads the state
 file if it exists. Finished and imported batches can be reconnected to by their
-old batch ids. Unfinished batches are requeued from the saved aggregate result
-counts; solver processes that were actually running at the moment of shutdown
-or crash are not resumed, so their benchmarks are run again.
+old batch ids. Unfinished batches are requeued from the most recent saved
+aggregate result counts; solver processes that were actually running at the
+moment of shutdown or crash, and completed jobs newer than the last result
+checkpoint, are not resumed, so their benchmarks are run again.
 
 ## Submitting A Batch
 
@@ -617,6 +622,8 @@ relative solver command `yices` is resolved under `/opt/solvers` on the server.
 - `-generations 0` infinite mode is not supported in server mode.
 - State persistence is not a live process checkpoint: running solver processes
   are lost on server exit and their unfinished jobs are requeued on restart.
+  Recently completed jobs may also be requeued if they finished after the last
+  `-state-save-interval` checkpoint.
 - State files are written by one server process. Do not run two benchmark
   servers against the same `-state-file`.
 - Reconnect by folder can recreate a finished batch id from CSV files when no

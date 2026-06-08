@@ -45,6 +45,8 @@ type state = {
   max_memory : int option;
   output_root : string;
   state_file : string option;
+  state_save_interval : float;
+  mutable last_state_save : float;
   mutable next_batch : int;
   mutable pending : job list;
   mutable running : int;
@@ -283,10 +285,16 @@ let save_state state =
   match state.state_file with
   | None -> ()
   | Some path -> (
-      try write_json_file_atomic path (server_state_to_yojson state)
+      try
+        write_json_file_atomic path (server_state_to_yojson state);
+        state.last_state_save <- Unix.gettimeofday ()
       with exn ->
         state.log_server
           (Format.sprintf "could not save server state to %s: %s" path (Printexc.to_string exn)))
+
+let save_state_checkpoint state =
+  let now = Unix.gettimeofday () in
+  if now -. state.last_state_save >= state.state_save_interval then save_state state
 
 let send_line writer line =
   Buf_write.string writer line;
@@ -509,7 +517,7 @@ let run_job proc_mgr state job =
           Common.add_result ~htbl:batch.htbl ~nb_benchmarks:(List.length request.lines)
             solver_name job.benchmark result;
           batch.completed <- batch.completed + 1;
-          save_state state;
+          save_state_checkpoint state;
           publish_prior_progress state batch;
           publish batch
             (Job_finished
@@ -1035,6 +1043,7 @@ let () =
   let output_root = ref "." in
   let server_log = ref None in
   let state_file = ref None in
+  let state_save_interval = ref 30 in
   let options =
     [
       ("-host", Arg.Set_string host, "Host/interface to bind (default 127.0.0.1)");
@@ -1048,6 +1057,9 @@ let () =
       ( "-state-file",
         Arg.String (fun path -> state_file := Some path),
         "JSON file used to persist server batch state" );
+      ( "-state-save-interval",
+        Arg.Set_int state_save_interval,
+        "Minimum seconds between result checkpoint writes (default 30)" );
     ]
   in
   Arg.parse options
@@ -1057,6 +1069,7 @@ let () =
     "Usage: benchmark-server [options]";
   let cores = parse_positive "-cores" !cores in
   let port = parse_positive "-port" !port in
+  let state_save_interval = parse_positive "-state-save-interval" !state_save_interval in
   Option.iter (fun m -> ignore (parse_positive "-max-memory" m)) !max_memory;
   let state_file =
     Some (Option.value !state_file ~default:(Filename.concat !output_root "benchmark-server-state.json"))
@@ -1081,6 +1094,8 @@ let () =
       max_memory = !max_memory;
       output_root = !output_root;
       state_file;
+      state_save_interval = float_of_int state_save_interval;
+      last_state_save = 0.;
       next_batch = 0;
       pending = [];
       running = 0;
