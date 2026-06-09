@@ -119,10 +119,11 @@ case $option in
 	;;
     qs)
 	echo "Done with QS"
-	make_wrapper "$filename-under20-mcsat" "-under 20 -mcsat"
-	make_wrapper "$filename-under20-cdclT" "-under 20 -cdclT"
-	make_wrapper "$filename-under20-cdclT-cadical" "-under 20 -cdclT -delegate cadical"
-	make_wrapper "$filename-under20-cdclT-cryptominisat" "-under 20 -cdclT -delegate cryptominisat"
+	make_wrapper "$filename-mcsat" "-mcsat"
+	make_wrapper "$filename-cdclT" "-cdclT"
+	make_wrapper "$filename-cdclT-cadical" "-cdclT -delegate cadical"
+	make_wrapper "$filename-cdclT-cryptominisat" "-cdclT -delegate cryptominisat"
+	make_wrapper "$filename-auto" "-auto_portfolio 1200"
 	;;
     *)
 	echo "#!/bin/bash
