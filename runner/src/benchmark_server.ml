@@ -696,12 +696,29 @@ let create_imported_batch state ~folder ~htbl ~total_jobs =
   Hashtbl.add state.folder_batches folder batch;
   batch
 
+let ensure_finished_excel_from_csv state batch =
+  match batch.status with
+  | Finished when batch.request.excel ->
+      let xlsx_path = Filename.concat batch.out_dir "results.xlsx" in
+      if Sys.file_exists xlsx_path then Ok batch
+      else (
+        try
+          let htbl, total_jobs = Common.load_csv_dir_native batch.out_dir in
+          Common.hashtables_to_excel_native ~overwrite:true batch.out_dir htbl
+            Common.cmp_user;
+          state.log_server
+            (Format.sprintf "regenerated %s for %s from %i CSV rows" xlsx_path
+               batch.id total_jobs);
+          Ok batch
+        with exn -> Error (Printexc.to_string exn))
+  | Running | Paused | Finished | Failed _ | Killed _ -> Ok batch
+
 let batch_of_reconnect_folder state folder =
   match resolve_reconnect_folder state folder with
   | Error message -> Error message
   | Ok folder -> (
       match Hashtbl.find_opt state.folder_batches folder with
-      | Some batch -> Ok batch
+      | Some batch -> ensure_finished_excel_from_csv state batch
       | None -> (
           try
             let htbl, total_jobs = Common.load_csv_dir_native folder in
@@ -994,7 +1011,10 @@ let handle_client state sw flow _addr =
                      message =
                        "unknown job id and could not import output folder: " ^ message;
                    }))
-      | Some batch -> watch_batch writer batch ~download)
+      | Some batch -> (
+          match ensure_finished_excel_from_csv state batch with
+          | Ok batch -> watch_batch writer batch ~download
+          | Error message -> send_event writer (Batch_failed { batch_id; message })))
   | Kill { batch_id } -> send_event writer (kill_batch state batch_id)
   | Pause { batch_id } -> send_event writer (pause_batch state batch_id)
   | Unpause { batch_id } -> send_event writer (unpause_batch state batch_id)

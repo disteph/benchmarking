@@ -644,17 +644,25 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
     (contains ~needle:"finished batch-" import.output);
   assert_bool "folder reconnect without download should not download"
     (not (contains ~needle:"downloaded output files to " import.output));
+  let server_xlsx = Filename.concat import_dir "results.xlsx" in
   assert_bool "folder reconnect should produce results.xlsx on server"
-    (Sys.file_exists (Filename.concat import_dir "results.xlsx"));
+    (Sys.file_exists server_xlsx);
   let batch_id = batch_id_of_output import.output in
+  Sys.remove server_xlsx;
   let same_folder = run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs" ] in
   assert_exit "folder reconnect reuse" 0 same_folder;
   let reused_batch_id = batch_id_of_output same_folder.output in
   assert_bool "folder reconnect should reuse batch id" (String.equal batch_id reused_batch_id);
+  assert_bool "folder reconnect should regenerate missing results.xlsx on server"
+    (Sys.file_exists server_xlsx);
+  Sys.remove server_xlsx;
   let download = run_client ~client ~client_cwd ~port [ "-download"; batch_id ] in
   assert_exit "folder reconnect download by batch id" 0 download;
   let dir = download_dir_of_output download.output in
   assert_files_exact dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ];
+  assert_bool "batch id download should regenerate missing results.xlsx on server"
+    (Sys.file_exists server_xlsx);
+  Sys.remove server_xlsx;
   let direct_download =
     run_client ~client ~client_cwd ~port [ "-download"; "imported-csvs" ]
   in
@@ -664,6 +672,8 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
     (String.equal batch_id direct_batch_id);
   let direct_dir = download_dir_of_output direct_download.output in
   assert_files_exact direct_dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ];
+  assert_bool "folder download should regenerate missing results.xlsx on server"
+    (Sys.file_exists server_xlsx);
   let xlsx_path = Filename.concat dir "results.xlsx" in
   let workbook = read_zip_entry xlsx_path "xl/workbook.xml" in
   let chart = read_zip_entry xlsx_path "xl/charts/chart1.xml" in
