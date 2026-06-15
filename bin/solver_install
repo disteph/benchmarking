@@ -11,6 +11,7 @@ option=$1
 # yices2 directory
 yices2_dir="$dir/yices2"
 yicesqs_dir="$dir/yicesQS"
+yices2_ocaml_bindings_dir="$dir/yices2_ocaml_bindings"
 
 export LD_LIBRARY_PATH=$dir/install/lib:/usr/local/lib
 export LDFLAGS="-L/space-1/yices/sgl_exp/lib/lib"
@@ -53,6 +54,30 @@ opt=""
 prefix=""
 suffix=""
 
+clean_git_hash() {
+    repo_dir=$1
+    repo_name=$2
+
+    if [ ! -d "$repo_dir" ]; then
+	echo "$repo_name directory not found: $repo_dir" >&2
+	exit 1
+    fi
+
+    if ! git -C "$repo_dir" rev-parse --git-dir >/dev/null 2>&1; then
+	echo "$repo_name directory is not a git repository: $repo_dir" >&2
+	exit 1
+    fi
+
+    repo_status=$( git -C "$repo_dir" status --porcelain --ignore-submodules=none )
+    if [ -n "$repo_status" ]; then
+	echo "$repo_name directory has uncommitted changes:" >&2
+	echo "$repo_status" >&2
+	exit 1
+    fi
+
+    git -C "$repo_dir" rev-parse --short HEAD
+}
+
 make_wrapper() {
     wrapper=$1
     shift
@@ -91,8 +116,10 @@ case $option in
 	tag="api_version"
         ;;
     qs)
+	bindings_hash=$( clean_git_hash "$yices2_ocaml_bindings_dir" "Yices2 OCaml bindings" )
 	make
 	prefix="yicesQS-"
+	suffix="-$bindings_hash"
 	if [ -x "$yicesqs_dir/main.exe" ]; then
 	    bin="$yicesqs_dir/main.exe"
 	else
