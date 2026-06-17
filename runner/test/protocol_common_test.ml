@@ -39,6 +39,7 @@ let test_submit_roundtrip () =
       assert_int "generations" submit_request.generations r.generations;
       assert_bool "excel" r.excel
   | Reconnect _ -> fail "decoded submit as reconnect"
+  | Aggregate _ -> fail "decoded submit as aggregate"
   | Kill _ -> fail "decoded submit as kill"
   | Pause _ -> fail "decoded submit as pause"
   | Unpause _ -> fail "decoded submit as unpause"
@@ -52,6 +53,7 @@ let test_reconnect_roundtrip () =
   | Reconnect { batch_id; download } ->
       assert_equal "batch_id" "batch-000123" batch_id;
       assert_bool "download" download
+  | Aggregate _ -> fail "decoded reconnect as aggregate"
   | Kill _ -> fail "decoded reconnect as kill"
   | Pause _ -> fail "decoded reconnect as pause"
   | Unpause _ -> fail "decoded reconnect as unpause"
@@ -63,17 +65,34 @@ let test_legacy_reconnect_defaults_no_download () =
   | Reconnect { batch_id; download } ->
       assert_equal "batch_id" "batch-000123" batch_id;
       assert_bool "download default" (not download)
+  | Aggregate _ -> fail "decoded reconnect as aggregate"
   | Kill _ -> fail "decoded reconnect as kill"
   | Pause _ -> fail "decoded reconnect as pause"
   | Unpause _ -> fail "decoded reconnect as unpause"
   | Submit _ -> fail "decoded reconnect as submit"
   | State -> fail "decoded reconnect as state"
 
+let test_aggregate_roundtrip () =
+  match
+    Protocol.encode_request (Aggregate { prefix = "QF_NRA5"; download = true })
+    |> Protocol.decode_request
+  with
+  | Aggregate { prefix; download } ->
+      assert_equal "prefix" "QF_NRA5" prefix;
+      assert_bool "download" download
+  | Submit _ -> fail "decoded aggregate as submit"
+  | Reconnect _ -> fail "decoded aggregate as reconnect"
+  | Kill _ -> fail "decoded aggregate as kill"
+  | Pause _ -> fail "decoded aggregate as pause"
+  | Unpause _ -> fail "decoded aggregate as unpause"
+  | State -> fail "decoded aggregate as state"
+
 let test_kill_roundtrip () =
   match Protocol.encode_request (Kill { batch_id = "batch-000123" }) |> Protocol.decode_request with
   | Kill { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
   | Submit _ -> fail "decoded kill as submit"
   | Reconnect _ -> fail "decoded kill as reconnect"
+  | Aggregate _ -> fail "decoded kill as aggregate"
   | Pause _ -> fail "decoded kill as pause"
   | Unpause _ -> fail "decoded kill as unpause"
   | State -> fail "decoded kill as state"
@@ -85,6 +104,7 @@ let test_pause_roundtrip () =
   | Pause { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
   | Submit _ -> fail "decoded pause as submit"
   | Reconnect _ -> fail "decoded pause as reconnect"
+  | Aggregate _ -> fail "decoded pause as aggregate"
   | Kill _ -> fail "decoded pause as kill"
   | Unpause _ -> fail "decoded pause as unpause"
   | State -> fail "decoded pause as state"
@@ -96,6 +116,7 @@ let test_unpause_roundtrip () =
   | Unpause { batch_id } -> assert_equal "batch_id" "batch-000123" batch_id
   | Submit _ -> fail "decoded unpause as submit"
   | Reconnect _ -> fail "decoded unpause as reconnect"
+  | Aggregate _ -> fail "decoded unpause as aggregate"
   | Kill _ -> fail "decoded unpause as kill"
   | Pause _ -> fail "decoded unpause as pause"
   | State -> fail "decoded unpause as state"
@@ -105,6 +126,7 @@ let test_state_roundtrip () =
   | State -> ()
   | Submit _ -> fail "decoded state as submit"
   | Reconnect _ -> fail "decoded state as reconnect"
+  | Aggregate _ -> fail "decoded state as aggregate"
   | Kill _ -> fail "decoded state as kill"
   | Pause _ -> fail "decoded state as pause"
   | Unpause _ -> fail "decoded state as unpause"
@@ -221,6 +243,7 @@ let () =
   test_submit_roundtrip ();
   test_reconnect_roundtrip ();
   test_legacy_reconnect_defaults_no_download ();
+  test_aggregate_roundtrip ();
   test_kill_roundtrip ();
   test_pause_roundtrip ();
   test_unpause_roundtrip ();

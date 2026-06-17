@@ -40,6 +40,12 @@ and batch_status =
   | Failed of string
   | Killed of string
 
+type aggregate_prefix = {
+  folder_prefix : string;
+  parent_path : string;
+  xlsx_path : string;
+}
+
 type state = {
   cores : int;
   max_memory : int option;
@@ -398,6 +404,15 @@ let publish_output_files batch =
 let send_output_files writer batch =
   List.iter (send_event writer) (output_file_events batch)
 
+let send_output_file writer ~batch_id ~name ~path =
+  send_event writer
+    (Output_file
+       {
+         batch_id;
+         name = Common.safe_output_file_name name;
+         contents = Protocol.base64_encode (Common.read_file_binary path);
+       })
+
 let unfinished_jobs batch =
   match batch.status with
   | Running -> max 0 (batch.total_jobs - batch.completed)
@@ -615,6 +630,10 @@ let rec path_is_under ~root path =
   let parent = Filename.dirname path in
   not (String.equal parent path) && path_is_under ~root parent
 
+let starts_with ~prefix s =
+  let prefix_len = String.length prefix in
+  String.length s >= prefix_len && String.equal (String.sub s 0 prefix_len) prefix
+
 let resolve_reconnect_folder state folder =
   if Filename.is_relative folder then
     match canonical_directory state.output_root with
@@ -627,6 +646,38 @@ let resolve_reconnect_folder state folder =
             if path_is_under ~root path then Ok path
             else Error (Format.sprintf "relative folder escapes output root: %s" folder))
   else canonical_directory folder
+
+let resolve_aggregate_prefix state prefix =
+  if String.equal prefix "" then Error "-aggregate prefix cannot be empty"
+  else
+    let folder_prefix = Filename.basename prefix in
+    if
+      String.equal folder_prefix ""
+      || String.equal folder_prefix "."
+      || String.equal folder_prefix ".."
+    then Error (Format.sprintf "invalid aggregate folder prefix: %s" prefix)
+    else
+      let parent = Filename.dirname prefix in
+      if Filename.is_relative prefix then
+        match canonical_directory state.output_root with
+        | Error message -> Error message
+        | Ok root -> (
+            let parent_path = Filename.concat root parent in
+            match canonical_directory parent_path with
+            | Error message -> Error message
+            | Ok parent_path ->
+                if path_is_under ~root parent_path then
+                  Ok
+                    {
+                      folder_prefix;
+                      parent_path;
+                      xlsx_path = Filename.concat root (prefix ^ ".xlsx");
+                    }
+                else Error (Format.sprintf "relative prefix escapes output root: %s" prefix))
+      else
+        match canonical_directory parent with
+        | Error message -> Error message
+        | Ok parent_path -> Ok { folder_prefix; parent_path; xlsx_path = prefix ^ ".xlsx" }
 
 let htbl_commands htbl =
   Common.HStrings.to_list htbl |> List.map fst |> List.sort String.compare
@@ -730,6 +781,42 @@ let batch_of_reconnect_folder state folder =
               (Format.sprintf "imported %s as %s with %i CSV rows" folder batch.id total_jobs);
             Ok batch
           with exn -> Error (Printexc.to_string exn)))
+
+let csv_files_in_dir dir =
+  Sys.readdir dir |> Array.to_list |> List.sort String.compare
+  |> List.filter_map (fun name ->
+         match Common.strip_suffix ~suffix:".csv" name with
+         | Some _ -> Some (Filename.concat dir name)
+         | None -> None)
+
+let aggregate_matching_csvs state prefix =
+  match resolve_aggregate_prefix state prefix with
+  | Error message -> Error message
+  | Ok { folder_prefix; parent_path; xlsx_path } -> (
+      try
+        let matching_dirs =
+          Sys.readdir parent_path |> Array.to_list |> List.sort String.compare
+          |> List.filter_map (fun name ->
+                 let path = Filename.concat parent_path name in
+                 if starts_with ~prefix:folder_prefix name
+                    && Sys.file_exists path && Sys.is_directory path
+                 then Some path
+                 else None)
+        in
+        let csv_paths = List.concat_map csv_files_in_dir matching_dirs in
+        if csv_paths = [] then
+          Error (Format.sprintf "no CSV files found for aggregate prefix: %s" prefix)
+        else
+          let htbl, total_rows =
+            Common.load_csv_files_native ~source:("aggregate prefix " ^ prefix) csv_paths
+          in
+          Common.hashtables_to_excel_file_native ~overwrite:true xlsx_path htbl
+            Common.cmp_user;
+          state.log_server
+            (Format.sprintf "aggregated %i CSV files and %i CSV rows into %s"
+               (List.length csv_paths) total_rows xlsx_path);
+          Ok (xlsx_path, List.length csv_paths, total_rows)
+      with exn -> Error (Printexc.to_string exn))
 
 let enqueue_jobs state batch =
   let request = batch.request in
@@ -1015,6 +1102,16 @@ let handle_client state sw flow _addr =
           match ensure_finished_excel_from_csv state batch with
           | Ok batch -> watch_batch writer batch ~download
           | Error message -> send_event writer (Batch_failed { batch_id; message })))
+  | Aggregate { prefix; download } -> (
+      match aggregate_matching_csvs state prefix with
+      | Ok (xlsx_path, _csv_count, _total_rows) ->
+          let batch_id = "aggregate " ^ prefix in
+          if download then
+            send_output_file writer ~batch_id ~name:(Filename.basename xlsx_path)
+              ~path:xlsx_path;
+          send_event writer
+            (Batch_finished { batch_id; output_dir = xlsx_path })
+      | Error message -> send_event writer (Batch_failed { batch_id = prefix; message }))
   | Kill { batch_id } -> send_event writer (kill_batch state batch_id)
   | Pause { batch_id } -> send_event writer (pause_batch state batch_id)
   | Unpause { batch_id } -> send_event writer (unpause_batch state batch_id)

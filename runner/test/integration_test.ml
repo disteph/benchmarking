@@ -292,11 +292,11 @@ let test_client_cores_rejected ~client ~client_cwd list_path solver =
 let test_reconnect_download_conflict ~client ~client_cwd ~port =
   let result =
     run_client ~client ~client_cwd ~port
-      [ "-reconnect"; "batch-missing"; "-download"; "batch-missing" ]
+      [ "-download" ]
   in
-  assert_exit "client -reconnect/-download rejection" 2 result;
-  assert_bool "client -reconnect/-download message"
-    (contains ~needle:"-reconnect and -download are mutually exclusive" result.output)
+  assert_exit "client -download without action rejection" 2 result;
+  assert_bool "client -download without action message"
+    (contains ~needle:"-download requires -reconnect or -aggregate" result.output)
 
 let test_state_rejects_submission ~client ~client_cwd ~port list_path solver =
   let result = run_client ~client ~client_cwd ~port [ "-state"; list_path; solver ] in
@@ -325,7 +325,7 @@ let test_finished_batch_reconnect_modes ~client ~client_cwd ~port batch_id =
     (contains ~needle:("finished " ^ batch_id) reconnect.output);
   assert_bool "finished batch reconnect should not download"
     (not (contains ~needle:"downloaded output files to " reconnect.output));
-  let download = run_client ~client ~client_cwd ~port [ "-download"; batch_id ] in
+  let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
   assert_exit "finished batch reconnect with download" 0 download;
   let dir = download_dir_of_output download.output in
   assert_files_exact dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
@@ -344,7 +344,7 @@ let test_detach_and_reconnect ~client ~client_cwd ~port ~bench_root ~exe_root li
   assert_bool "plain reconnect should not download files"
     (not (contains ~needle:"downloaded output files to " reconnect.output));
   let reconnect_with_download =
-    run_client ~client ~client_cwd ~port [ "-download"; batch_id ]
+    run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ]
   in
   assert_exit "reconnect with download" 0 reconnect_with_download;
   let dir = download_dir_of_output reconnect_with_download.output in
@@ -656,7 +656,7 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
   assert_bool "folder reconnect should regenerate missing results.xlsx on server"
     (Sys.file_exists server_xlsx);
   Sys.remove server_xlsx;
-  let download = run_client ~client ~client_cwd ~port [ "-download"; batch_id ] in
+  let download = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
   assert_exit "folder reconnect download by batch id" 0 download;
   let dir = download_dir_of_output download.output in
   assert_files_exact dir [ "results.xlsx"; "solver_a.csv"; "solver_b.csv" ];
@@ -664,7 +664,7 @@ let test_reconnect_folder_import ~client ~client_cwd ~port ~server_root =
     (Sys.file_exists server_xlsx);
   Sys.remove server_xlsx;
   let direct_download =
-    run_client ~client ~client_cwd ~port [ "-download"; "imported-csvs" ]
+    run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs"; "-download" ]
   in
   assert_exit "folder reconnect direct download" 0 direct_download;
   let direct_batch_id = batch_id_of_output direct_download.output in
@@ -695,7 +695,7 @@ let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
   mkdir_p import_dir;
   write_file (Filename.concat import_dir "solver_abs.csv")
     "solver_abs\t\"abs-case.smt2\"\tsat\t7.000000\t8.000000\t9.000000\n";
-  let import = run_client ~client ~client_cwd ~port [ "-download"; import_dir ] in
+  let import = run_client ~client ~client_cwd ~port [ "-reconnect"; import_dir; "-download" ] in
   assert_exit "absolute folder reconnect import" 0 import;
   assert_bool "absolute folder reconnect should print accepted id"
     (contains ~needle:"accepted job id batch-" import.output);
@@ -704,14 +704,16 @@ let test_reconnect_absolute_folder_import ~client ~client_cwd ~port root =
   assert_csv_contains_sat dir "solver_abs"
 
 let test_state_restore_after_restart ~client ~client_cwd ~port ~batch_id ~imported_batch_id =
-  let restored = run_client ~client ~client_cwd ~port [ "-download"; batch_id ] in
+  let restored = run_client ~client ~client_cwd ~port [ "-reconnect"; batch_id; "-download" ] in
   assert_exit "state restore batch reconnect" 0 restored;
   assert_bool "restored batch should keep batch id"
     (contains ~needle:("finished " ^ batch_id) restored.output);
   let restored_dir = download_dir_of_output restored.output in
   assert_files_exact restored_dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
   assert_csv_contains_sat restored_dir "sat_solver.sh";
-  let restored_import = run_client ~client ~client_cwd ~port [ "-download"; "imported-csvs" ] in
+  let restored_import =
+    run_client ~client ~client_cwd ~port [ "-reconnect"; "imported-csvs"; "-download" ]
+  in
   assert_exit "state restore imported folder reconnect" 0 restored_import;
   let restored_import_id = batch_id_of_output restored_import.output in
   assert_bool "restored folder mapping should reuse imported batch id"
@@ -772,7 +774,9 @@ let test_state_restore_requeues_running_batch ~client ~server ~client_cwd ~bench
     ~finally:(fun () -> stop_server server_pid)
     (fun () ->
       wait_for_server port;
-      let restored = run_client ~client ~client_cwd ~port [ "-download"; "batch-000001" ] in
+      let restored =
+        run_client ~client ~client_cwd ~port [ "-reconnect"; "batch-000001"; "-download" ]
+      in
       assert_exit "running state restore reconnect" 0 restored;
       assert_bool "running state restore should finish"
         (contains ~needle:"finished batch-000001" restored.output);
@@ -787,6 +791,44 @@ let test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root 
   assert_exit "empty folder reconnect rejection" 1 result;
   assert_bool "empty folder reconnect message"
     (contains ~needle:"no CSV result rows found" result.output)
+
+let test_aggregate_prefix ~client ~client_cwd ~port ~server_root =
+  let first_dir = Filename.concat server_root "aggregate-set-a" in
+  let second_dir = Filename.concat server_root "aggregate-set-b" in
+  let other_dir = Filename.concat server_root "aggregate-other" in
+  mkdir_p first_dir;
+  mkdir_p second_dir;
+  mkdir_p other_dir;
+  write_file (Filename.concat first_dir "solver_a.csv")
+    "solver_a\t\"agg-case-1.smt2\"\tsat\t1.000000\t2.000000\t3.000000\n";
+  write_file (Filename.concat second_dir "solver_b.csv")
+    "solver_b\t\"agg-case-2.smt2\"\tunsat\t4.000000\t5.000000\t6.000000\n";
+  write_file (Filename.concat other_dir "solver_noise.csv")
+    "solver_noise\t\"noise-case.smt2\"\tsat\t7.000000\t8.000000\t9.000000\n";
+  let result = run_client ~client ~client_cwd ~port [ "-aggregate"; "aggregate-set" ] in
+  assert_exit "aggregate prefix" 0 result;
+  let xlsx_path = Filename.concat (Unix.realpath server_root) "aggregate-set.xlsx" in
+  assert_bool "aggregate should report aggregate output"
+    (contains ~needle:("finished aggregate aggregate-set, output " ^ xlsx_path) result.output);
+  assert_bool "aggregate should produce PREFIX.xlsx" (Sys.file_exists xlsx_path);
+  let workbook = read_zip_entry xlsx_path "xl/workbook.xml" in
+  let sheet4 = read_zip_entry xlsx_path "xl/worksheets/sheet4.xml" in
+  let sheet5 = read_zip_entry xlsx_path "xl/worksheets/sheet5.xml" in
+  let solver_sheets = sheet4 ^ sheet5 in
+  assert_bool "aggregate spreadsheet should have Plots worksheet"
+    (contains ~needle:"<sheet name=\"Plots\"" workbook);
+  assert_bool "aggregate spreadsheet should include first matching CSV"
+    (contains ~needle:"agg-case-1.smt2" solver_sheets);
+  assert_bool "aggregate spreadsheet should include second matching CSV"
+    (contains ~needle:"agg-case-2.smt2" solver_sheets);
+  assert_bool "aggregate spreadsheet should exclude nonmatching prefix"
+    (not (contains ~needle:"noise-case.smt2" solver_sheets));
+  let download =
+    run_client ~client ~client_cwd ~port [ "-aggregate"; "aggregate-set"; "-download" ]
+  in
+  assert_exit "aggregate prefix download" 0 download;
+  let download_dir = download_dir_of_output download.output in
+  assert_files_exact download_dir [ "aggregate-set.xlsx" ]
 
 let test_server_output_collision server_root =
   let dirs =
@@ -885,6 +927,7 @@ let () =
       let imported_batch_id = test_reconnect_folder_import ~client ~client_cwd ~port ~server_root in
       test_reconnect_absolute_folder_import ~client ~client_cwd ~port root;
       test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root;
+      test_aggregate_prefix ~client ~client_cwd ~port ~server_root;
       assert_bool "server state file should exist" (Sys.file_exists state_file);
       stop_server server_pid;
       let restarted_log = Filename.concat root "server-restarted.log" in

@@ -11,10 +11,11 @@ let detach = ref false
 let server = ref (Sys.getenv_opt "BENCHMARK_SERVER" |> Option.value ~default:"127.0.0.1:8765")
 let cores_was_used = ref None
 let reconnect = ref None
+let aggregate = ref None
 let kill = ref None
 let pause = ref None
 let unpause = ref None
-let download = ref None
+let download = ref false
 let state_view = ref false
 let server_benchmark_root = ref None
 let server_exe_root = ref None
@@ -388,9 +389,11 @@ let options =
       Arg.String (fun id -> reconnect := Some id),
       "Reconnect to an existing server job id or import a server-side result folder" );
     ( "-download",
-      Arg.String (fun id -> download := Some id),
-      "Reconnect to an existing server job id or import a server-side result folder, then download \
-       output files" );
+      Arg.Set download,
+      "Download output files for -reconnect or -aggregate" );
+    ( "-aggregate",
+      Arg.String (fun prefix -> aggregate := Some prefix),
+      "Aggregate server-side result folders matching PREFIX* into PREFIX.xlsx" );
     ("-state", Arg.Set state_view, "Continuously display server queue state");
     ("-kill", Arg.String (fun id -> kill := Some id), "Kill an existing server job id");
     ("-pause", Arg.String (fun id -> pause := Some id), "Pause an existing server job id");
@@ -410,7 +413,7 @@ let () =
       (fun action -> action)
       [
         Option.map (fun id -> (`Reconnect, id)) !reconnect;
-        Option.map (fun id -> (`Download, id)) !download;
+        Option.map (fun prefix -> (`Aggregate, prefix)) !aggregate;
         Option.map (fun id -> (`Kill, id)) !kill;
         Option.map (fun id -> (`Pause, id)) !pause;
         Option.map (fun id -> (`Unpause, id)) !unpause;
@@ -420,33 +423,33 @@ let () =
     if selected_actions <> [] || args <> [] then (
       prerr_endline
         "benchmark: -state is mutually exclusive with -reconnect, -download, -kill, -pause, \
-         -unpause, and benchmark submission";
+         -unpause, -aggregate, and benchmark submission";
       exit 2);
     exit (show_state ()));
-  (match !reconnect, !download, !kill, !pause, !unpause with
-  | Some _, Some _, _, _, _ ->
-      prerr_endline "benchmark: -reconnect and -download are mutually exclusive";
+  (match !reconnect, !download, !aggregate, !kill, !pause, !unpause with
+  | None, true, None, _, _, _ ->
+      prerr_endline "benchmark: -download requires -reconnect or -aggregate";
       exit 2
-  | Some _, None, Some _, _, _ ->
+  | Some _, true, Some _, _, _, _ ->
+      prerr_endline "benchmark: -download can modify either -reconnect or -aggregate, not both";
+      exit 2
+  | Some _, _, _, Some _, _, _ ->
       prerr_endline "benchmark: -reconnect and -kill are mutually exclusive";
-      exit 2
-  | None, Some _, Some _, _, _ ->
-      prerr_endline "benchmark: -download and -kill are mutually exclusive";
       exit 2
   | _ when List.length selected_actions > 1 ->
       prerr_endline
-        "benchmark: -reconnect, -download, -kill, -pause, and -unpause are mutually exclusive";
+        "benchmark: -reconnect, -aggregate, -kill, -pause, and -unpause are mutually exclusive";
       exit 2
   | _ -> ());
   match selected_actions, args with
   | [ (`Reconnect, batch_id) ], [] ->
       exit
-        (submit ~detach_after_accept:false ~download_outputs:false
-           (Protocol.Reconnect { batch_id; download = false }))
-  | [ (`Download, batch_id) ], [] ->
+        (submit ~detach_after_accept:false ~download_outputs:!download
+           (Protocol.Reconnect { batch_id; download = !download }))
+  | [ (`Aggregate, prefix) ], [] ->
       exit
-        (submit ~detach_after_accept:false ~download_outputs:true
-           (Protocol.Reconnect { batch_id; download = true }))
+        (submit ~detach_after_accept:false ~download_outputs:!download
+           (Protocol.Aggregate { prefix; download = !download }))
   | [ (`Kill, batch_id) ], [] ->
       exit (submit ~detach_after_accept:false ~download_outputs:false (Protocol.Kill { batch_id }))
   | [ (`Pause, batch_id) ], [] ->
@@ -459,7 +462,7 @@ let () =
       let name =
         match action with
         | `Reconnect -> "reconnect"
-        | `Download -> "download"
+        | `Aggregate -> "aggregate"
         | `Kill -> "kill"
         | `Pause -> "pause"
         | `Unpause -> "unpause"

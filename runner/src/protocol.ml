@@ -16,6 +16,7 @@ type submit_request = {
 type request =
   | Submit of submit_request
   | Reconnect of { batch_id : string; download : bool }
+  | Aggregate of { prefix : string; download : bool }
   | Kill of { batch_id : string }
   | Pause of { batch_id : string }
   | Unpause of { batch_id : string }
@@ -163,6 +164,14 @@ let reconnect_to_yojson batch_id download =
       ("download", `Bool download);
     ]
 
+let aggregate_to_yojson prefix download =
+  `Assoc
+    [
+      ("type", `String "aggregate");
+      ("prefix", `String prefix);
+      ("download", `Bool download);
+    ]
+
 let kill_to_yojson batch_id =
   `Assoc [ ("type", `String "kill"); ("batch_id", `String batch_id) ]
 
@@ -202,6 +211,7 @@ let submit_of_yojson = function
 let request_to_yojson = function
   | Submit request -> submit_to_yojson request
   | Reconnect { batch_id; download } -> reconnect_to_yojson batch_id download
+  | Aggregate { prefix; download } -> aggregate_to_yojson prefix download
   | Kill { batch_id } -> kill_to_yojson batch_id
   | Pause { batch_id } -> pause_to_yojson batch_id
   | Unpause { batch_id } -> unpause_to_yojson batch_id
@@ -215,6 +225,15 @@ let request_of_yojson = function
           Reconnect
             {
               batch_id = as_string (member "batch_id" fields);
+              download =
+                (match List.assoc_opt "download" fields with
+                | Some value -> as_bool value
+                | None -> false);
+            }
+      | "aggregate" ->
+          Aggregate
+            {
+              prefix = as_string (member "prefix" fields);
               download =
                 (match List.assoc_opt "download" fields with
                 | Some value -> as_bool value
@@ -455,6 +474,7 @@ let encode_submit r = encode_request (Submit r)
 let decode_submit s =
   match decode_request s with
   | Submit r -> r
-  | Reconnect _ | Kill _ | Pause _ | Unpause _ | State -> invalid_arg "expected submit"
+  | Reconnect _ | Aggregate _ | Kill _ | Pause _ | Unpause _ | State ->
+      invalid_arg "expected submit"
 let encode_event e = Yojson.Safe.to_string (event_to_yojson e)
 let decode_event s = Yojson.Safe.from_string s |> event_of_yojson

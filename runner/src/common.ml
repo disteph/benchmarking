@@ -325,22 +325,28 @@ let load_csv_file_into_hashtables ~htbl path =
        with End_of_file -> ());
       !rows)
 
+let load_csv_files_native ?(source = "CSV files") paths =
+  let htbl = HStrings.create 16 in
+  let total_rows =
+    paths
+    |> List.fold_left
+         (fun total path -> total + load_csv_file_into_hashtables ~htbl path)
+         0
+  in
+  if total_rows = 0 then invalid_arg ("no CSV result rows found in " ^ source);
+  (htbl, total_rows)
+
 let load_csv_dir_native dir =
   if not (Sys.file_exists dir && Sys.is_directory dir) then
     invalid_arg ("not a directory: " ^ dir);
-  let htbl = HStrings.create 16 in
-  let total_rows =
+  let paths =
     Sys.readdir dir |> Array.to_list |> List.sort String.compare
     |> List.filter_map (fun name ->
            match strip_suffix ~suffix:".csv" name with
            | Some _ -> Some (Filename.concat dir name)
            | None -> None)
-    |> List.fold_left
-         (fun total path -> total + load_csv_file_into_hashtables ~htbl path)
-         0
   in
-  if total_rows = 0 then invalid_arg ("no CSV result rows found in " ^ dir);
-  (htbl, total_rows)
+  load_csv_files_native ~source:dir paths
 
 let stream_to_hashtables ~htbl ~nb_benchmarks stream =
   drain_stream
@@ -409,7 +415,7 @@ let hashtables_to_files_native ?(overwrite = false) out_path htbl sort =
   in
   Seq.iter process out_seq
 
-let hashtables_to_excel_native ?timeout ?(overwrite = false) out_path htbl sort =
+let hashtables_to_excel_file_native ?timeout ?(overwrite = false) filename htbl sort =
   let project command (instance, r) =
     match r with
     | `Answer (Unsat, { wall; user; system }) ->
@@ -455,10 +461,13 @@ let hashtables_to_excel_native ?timeout ?(overwrite = false) out_path htbl sort 
            in
            { Excel.name = Format.sprintf "Sheet%i" (i + 1); rows })
   in
-  let filename = Filename.concat out_path "results.xlsx" in
   if (not overwrite) && Sys.file_exists filename then
     invalid_arg ("output file already exists: " ^ filename);
   Excel.write_workbook ?timeout filename (sheets, clashes)
+
+let hashtables_to_excel_native ?timeout ?(overwrite = false) out_path htbl sort =
+  hashtables_to_excel_file_native ?timeout ~overwrite
+    (Filename.concat out_path "results.xlsx") htbl sort
 
 let sort_of_name = function
   | "alpha" -> cmp_alpha
