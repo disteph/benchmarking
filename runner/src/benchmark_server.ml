@@ -17,9 +17,9 @@ and watcher = {
 and batch = {
   sequence : int;
   id : string;
-  request : Protocol.submit_request;
+  mutable request : Protocol.submit_request;
   out_dir : string;
-  htbl : (int * Common.aggregate) Common.HStrings.t Common.HStrings.t;
+  mutable htbl : (int * Common.aggregate) Common.HStrings.t Common.HStrings.t;
   log : string Stream.t;
   log_done : bool ref;
   log_drained : Eio.Condition.t;
@@ -211,18 +211,28 @@ let status_of_yojson = function
   | _ -> invalid_arg "expected JSON object"
 
 let batch_to_yojson batch =
+  let request =
+    match batch.status with
+    | Finished -> { batch.request with lines = [] }
+    | Running | Paused | Failed _ | Killed _ -> batch.request
+  in
+  let results =
+    match batch.status with
+    | Finished -> `List []
+    | Running | Paused | Failed _ | Killed _ -> results_to_yojson batch.htbl
+  in
   `Assoc
     [
       ("sequence", `Int batch.sequence);
       ("id", `String batch.id);
-      ("request", Protocol.submit_to_yojson batch.request);
+      ("request", Protocol.submit_to_yojson request);
       ("out_dir", `String batch.out_dir);
       ("total_jobs", `Int batch.total_jobs);
       ("prior_jobs", `Int batch.prior_jobs);
       ("prior_completed", `Int batch.prior_completed);
       ("completed", `Int batch.completed);
       ("status", status_to_yojson batch.status);
-      ("results", results_to_yojson batch.htbl);
+      ("results", results);
     ]
 
 let batch_of_yojson = function
@@ -380,8 +390,26 @@ let add_state_watcher state =
 let remove_state_watcher state events =
   state.state_watchers := List.filter (fun existing -> existing != events) !(state.state_watchers)
 
+let disk_output_file_names out_dir =
+  let names =
+    Sys.readdir out_dir |> Array.to_list
+    |> List.filter (fun name ->
+           String.equal name "log"
+           || String.equal name "results.xlsx"
+           || Option.is_some (Common.strip_suffix ~suffix:".csv" name))
+  in
+  let rank = function
+    | "log" -> (0, "")
+    | "results.xlsx" -> (2, "")
+    | name -> (1, name)
+  in
+  names |> List.sort (fun a b -> compare (rank a) (rank b))
+
 let output_file_names batch =
-  Common.result_file_names ~excel:batch.request.excel batch.htbl
+  match batch.status with
+  | Finished -> disk_output_file_names batch.out_dir
+  | Running | Paused | Failed _ | Killed _ ->
+      Common.result_file_names ~excel:batch.request.excel batch.htbl
 
 let output_file_events batch =
   output_file_names batch
@@ -481,6 +509,13 @@ let take_runnable state =
 
 let result_sort batch = Common.sort_of_name batch.request.sort
 
+let compact_finished_batch batch =
+  batch.htbl <- Common.HStrings.create 0;
+  batch.request <- { batch.request with lines = [] }
+
+let finished_batch_is_compact batch =
+  batch.request.lines = [] && Common.HStrings.to_list batch.htbl = []
+
 let finish_batch state batch =
   match batch.status with
   | Failed _ | Finished | Killed _ -> ()
@@ -497,6 +532,7 @@ let finish_batch state batch =
         Eio.Condition.await_no_mutex batch.log_drained
       done;
       batch.status <- Finished;
+      compact_finished_batch batch;
       save_state state;
       publish_state_snapshot state;
       publish_output_files batch;
@@ -682,12 +718,6 @@ let resolve_aggregate_prefix state prefix =
 let htbl_commands htbl =
   Common.HStrings.to_list htbl |> List.map fst |> List.sort String.compare
 
-let htbl_benchmarks htbl =
-  Common.HStrings.to_list htbl
-  |> List.concat_map (fun (_, command_tbl) ->
-         Common.HStrings.to_list command_tbl |> List.map fst)
-  |> List.sort_uniq String.compare
-
 let htbl_completed_runs htbl command benchmark =
   match Common.HStrings.get htbl command with
   | None -> 0
@@ -707,14 +737,15 @@ let htbl_completed_count htbl =
 
 let create_imported_batch state ~folder ~htbl ~total_jobs =
   let sequence, id = next_batch_identity state in
+  let commands = htbl_commands htbl in
   let request : Protocol.submit_request =
     {
       benchmark_file = folder;
       benchmark_name = Filename.basename folder;
       server_benchmark_root = "";
       server_exe_root = "";
-      lines = htbl_benchmarks htbl;
-      commands = htbl_commands htbl;
+      lines = [];
+      commands;
       timeout = 1;
       memory = None;
       generations = 1;
@@ -729,7 +760,7 @@ let create_imported_batch state ~folder ~htbl ~total_jobs =
       id;
       request;
       out_dir = folder;
-      htbl;
+      htbl = Common.HStrings.create 0;
       log = Stream.create max_int;
       log_done = ref true;
       log_drained = Eio.Condition.create ();
@@ -986,9 +1017,17 @@ let restore_state state sw =
             exit 2
         in
         let max_sequence = ref 0 in
+        let compacted_finished = ref false in
         List.iter
           (fun batch ->
-            batch.completed <- min batch.total_jobs (htbl_completed_count batch.htbl);
+            (match batch.status with
+            | Running | Paused ->
+                batch.completed <- min batch.total_jobs (htbl_completed_count batch.htbl)
+            | Finished ->
+                if not (finished_batch_is_compact batch) then (
+                  compact_finished_batch batch;
+                  compacted_finished := true)
+            | Failed _ | Killed _ -> ());
             max_sequence := max !max_sequence batch.sequence;
             Hashtbl.replace state.batches batch.id batch)
           batches;
@@ -1015,6 +1054,7 @@ let restore_state state sw =
             if batch.completed >= batch.total_jobs then finish_batch state batch
             else enqueue_jobs state batch)
           running_batches;
+        if !compacted_finished then save_state state;
         state.log_server
           (Format.sprintf "loaded %d batches from %s" (List.length batches) path))
 
