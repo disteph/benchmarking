@@ -13,8 +13,14 @@ yices2_dir="$dir/yices2"
 yicesqs_dir="$dir/yicesQS"
 yices2_ocaml_bindings_dir="$dir/yices2_ocaml_bindings"
 
-export LD_LIBRARY_PATH=$dir/install/lib:/usr/local/lib
-export LDFLAGS="-L/space-1/yices/sgl_exp/lib/lib"
+case $option in
+    string|string-smt2)
+	;;
+    *)
+	export LD_LIBRARY_PATH=$dir/install/lib:/usr/local/lib
+	export LDFLAGS="-L/space-1/yices/sgl_exp/lib/lib"
+	;;
+esac
 
 mkdir -p "$dir/install"
 
