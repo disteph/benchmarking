@@ -20,6 +20,9 @@ mkdir -p "$dir/install"
 
 # descend into correct directory to get git tagging
 case $option in
+    string|string-smt2)
+        cd "$yices2_ocaml_bindings_dir"
+        ;;
     qs)
         cd "$yicesqs_dir"
         ;;
@@ -126,6 +129,15 @@ case $option in
 	    bin="$yicesqs_dir/_build/default/src/main.exe"
 	fi
 	;;
+    string|string-smt2)
+	make
+	prefix="yices_string_smt2-"
+	bin="$yices2_ocaml_bindings_dir/yices_string_smt2.exe"
+	if [ ! -x "$bin" ]; then
+	    echo "Expected executable not found: $bin" >&2
+	    exit 1
+	fi
+	;;
     *)
 	make
         bin_dir="x86_64-pc-linux-gnu-release/bin"
@@ -151,6 +163,9 @@ case $option in
 	make_wrapper "$filename-cdclT-cadical" "-cdclT -delegate cadical"
 	make_wrapper "$filename-cdclT-cryptominisat" "-cdclT -delegate cryptominisat"
 	make_wrapper "$filename-auto" "-auto_portfolio 1200"
+	;;
+    string|string-smt2)
+	echo "Done installing yices_string_smt2"
 	;;
     *)
 	echo "#!/bin/bash
