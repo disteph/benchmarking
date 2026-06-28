@@ -92,9 +92,9 @@ Common server options:
   server log file is written; messages go to the server trace output.
 - `-state-file FILE`
   JSON file used to persist batch ids, imported-folder mappings, queued work,
-  status, and minimal finished-batch metadata. Running and paused batches keep
-  aggregate result counts for recovery; finished and imported batches are
-  disk-backed by their output CSV/XLSX files. If omitted, the default is
+  status, and minimal terminal-batch metadata. Running and paused batches keep
+  aggregate result counts for recovery; finished, failed, killed, and imported
+  batches are disk-backed by their output files. If omitted, the default is
   `benchmark-server-state.json` under `-output-root`.
 - `-state-save-interval SECONDS`
   Minimum interval between result checkpoint writes while jobs are completing.

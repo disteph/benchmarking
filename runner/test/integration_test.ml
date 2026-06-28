@@ -792,9 +792,9 @@ let test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root 
   assert_bool "empty folder reconnect message"
     (contains ~needle:"no CSV result rows found" result.output)
 
-let assert_state_omits_finished_results state_file =
+let assert_state_omits_terminal_results state_file =
   let state = read_file state_file in
-  assert_bool "finished state should not serialize per-benchmark result rows"
+  assert_bool "terminal state should not serialize per-benchmark result rows"
     (not (contains ~needle:"\"benchmark\":" state))
 
 let test_aggregate_prefix ~client ~client_cwd ~port ~server_root =
@@ -934,7 +934,7 @@ let () =
       test_reconnect_empty_folder_rejected ~client ~client_cwd ~port ~server_root;
       test_aggregate_prefix ~client ~client_cwd ~port ~server_root;
       assert_bool "server state file should exist" (Sys.file_exists state_file);
-      assert_state_omits_finished_results state_file;
+      assert_state_omits_terminal_results state_file;
       stop_server server_pid;
       let restarted_log = Filename.concat root "server-restarted.log" in
       let restarted_pid =

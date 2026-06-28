@@ -220,16 +220,17 @@ let status_of_yojson = function
   | `String "killed" -> Killed ""
   | _ -> invalid_arg "expected JSON object"
 
+let terminal_status = function
+  | Finished | Failed _ | Killed _ -> true
+  | Running | Paused -> false
+
 let batch_to_yojson batch =
   let request =
-    match batch.status with
-    | Finished -> { batch.request with lines = [] }
-    | Running | Paused | Failed _ | Killed _ -> batch.request
+    if terminal_status batch.status then { batch.request with lines = [] }
+    else batch.request
   in
   let results =
-    match batch.status with
-    | Finished -> `List []
-    | Running | Paused | Failed _ | Killed _ -> results_to_yojson batch.htbl
+    if terminal_status batch.status then `List [] else results_to_yojson batch.htbl
   in
   `Assoc
     [
@@ -417,8 +418,8 @@ let disk_output_file_names out_dir =
 
 let output_file_names batch =
   match batch.status with
-  | Finished -> disk_output_file_names batch.out_dir
-  | Running | Paused | Failed _ | Killed _ ->
+  | Finished | Failed _ | Killed _ -> disk_output_file_names batch.out_dir
+  | Running | Paused ->
       Common.result_file_names ~excel:batch.request.excel batch.htbl
 
 let output_file_events batch =
@@ -519,11 +520,11 @@ let take_runnable state =
 
 let result_sort batch = Common.sort_of_name batch.request.sort
 
-let compact_finished_batch batch =
+let compact_terminal_batch batch =
   batch.htbl <- Common.HStrings.create 0;
   batch.request <- { batch.request with lines = [] }
 
-let finished_batch_is_compact batch =
+let terminal_batch_is_compact batch =
   batch.request.lines = [] && Common.HStrings.to_list batch.htbl = []
 
 let finish_batch state batch =
@@ -542,7 +543,7 @@ let finish_batch state batch =
         Eio.Condition.await_no_mutex batch.log_drained
       done;
       batch.status <- Finished;
-      compact_finished_batch batch;
+      compact_terminal_batch batch;
       save_state state;
       publish_state_snapshot state;
       publish_output_files batch;
@@ -552,6 +553,7 @@ let finish_batch state batch =
     with exn ->
       let message = Printexc.to_string exn in
       batch.status <- Failed message;
+      compact_terminal_batch batch;
       save_state state;
       publish_state_snapshot state;
       publish batch (Batch_failed { batch_id = batch.id; message });
@@ -904,6 +906,7 @@ let kill_batch state batch_id =
             Format.sprintf "removed %d pending jobs and cancelled %d running jobs" !removed running
           in
           batch.status <- Killed message;
+          compact_terminal_batch batch;
           save_state state;
           publish_state_snapshot state;
           List.iter
@@ -1027,17 +1030,16 @@ let restore_state state sw =
             exit 2
         in
         let max_sequence = ref 0 in
-        let compacted_finished = ref false in
+        let compacted_terminal = ref false in
         List.iter
           (fun batch ->
             (match batch.status with
             | Running | Paused ->
                 batch.completed <- min batch.total_jobs (htbl_completed_count batch.htbl)
-            | Finished ->
-                if not (finished_batch_is_compact batch) then (
-                  compact_finished_batch batch;
-                  compacted_finished := true)
-            | Failed _ | Killed _ -> ());
+            | Finished | Failed _ | Killed _ ->
+                if not (terminal_batch_is_compact batch) then (
+                  compact_terminal_batch batch;
+                  compacted_terminal := true));
             max_sequence := max !max_sequence batch.sequence;
             Hashtbl.replace state.batches batch.id batch)
           batches;
@@ -1064,7 +1066,7 @@ let restore_state state sw =
             if batch.completed >= batch.total_jobs then finish_batch state batch
             else enqueue_jobs state batch)
           running_batches;
-        if !compacted_finished then save_state state;
+        if !compacted_terminal then save_state state;
         state.log_server
           (Format.sprintf "loaded %d batches from %s" (List.length batches) path))
 
