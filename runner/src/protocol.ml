@@ -133,6 +133,11 @@ let as_string_list = function
   | `List xs -> List.map as_string xs
   | _ -> invalid_arg "expected JSON string list"
 
+let optional name fields parse default =
+  match List.assoc_opt name fields with
+  | Some value -> parse value
+  | None -> default
+
 let opt_int = function
   | `Null -> None
   | `Int i -> Some i
@@ -185,26 +190,37 @@ let state_to_yojson = `Assoc [ ("type", `String "state") ]
 
 let submit_of_yojson = function
   | `Assoc fields ->
-      if as_string (member "type" fields) <> "submit" then invalid_arg "expected submit";
+      (match List.assoc_opt "type" fields with
+      | Some value when as_string value <> "submit" -> invalid_arg "expected submit"
+      | Some _ | None -> ());
+      let benchmark_file = as_string (member "benchmark_file" fields) in
+      let benchmark_name =
+        optional "benchmark_name" fields as_string
+          (Filename.remove_extension (Filename.basename benchmark_file))
+      in
+      let server_benchmark_root =
+        match List.assoc_opt "server_benchmark_root" fields with
+        | Some value -> as_string value
+        | None -> optional "benchmark_prefix" fields as_string ""
+      in
+      let server_exe_root =
+        match List.assoc_opt "server_exe_root" fields with
+        | Some value -> as_string value
+        | None -> optional "cwd" fields as_string ""
+      in
       {
-        benchmark_file = as_string (member "benchmark_file" fields);
-        benchmark_name = as_string (member "benchmark_name" fields);
-        server_benchmark_root =
-          (match List.assoc_opt "server_benchmark_root" fields with
-          | Some value -> as_string value
-          | None -> as_string (member "benchmark_prefix" fields));
-        server_exe_root =
-          (match List.assoc_opt "server_exe_root" fields with
-          | Some value -> as_string value
-          | None -> as_string (member "cwd" fields));
-        lines = as_string_list (member "lines" fields);
-        commands = as_string_list (member "commands" fields);
-        timeout = as_int (member "timeout" fields);
-        memory = opt_int (member "memory" fields);
-        generations = as_int (member "generations" fields);
-        sort = as_string (member "sort" fields);
-        excel = as_bool (member "excel" fields);
-        detach = as_bool (member "detach" fields);
+        benchmark_file;
+        benchmark_name;
+        server_benchmark_root;
+        server_exe_root;
+        lines = optional "lines" fields as_string_list [];
+        commands = optional "commands" fields as_string_list [];
+        timeout = optional "timeout" fields as_int 300;
+        memory = optional "memory" fields opt_int None;
+        generations = optional "generations" fields as_int 1;
+        sort = optional "sort" fields as_string "alpha";
+        excel = optional "excel" fields as_bool false;
+        detach = optional "detach" fields as_bool false;
       }
   | _ -> invalid_arg "expected JSON object"
 

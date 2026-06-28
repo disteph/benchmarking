@@ -86,6 +86,11 @@ let json_list = function
   | `List xs -> xs
   | _ -> invalid_arg "expected JSON list"
 
+let optional_json name fields parse default =
+  match List.assoc_opt name fields with
+  | Some value -> parse value
+  | None -> default
+
 let times_to_yojson { Common.wall; user; system } =
   `Assoc [ ("wall", `Float wall); ("user", `Float user); ("system", `Float system) ]
 
@@ -208,6 +213,11 @@ let status_of_yojson = function
       | "failed" -> Failed (json_string (json_member "message" fields))
       | "killed" -> Killed (json_string (json_member "message" fields))
       | status -> invalid_arg ("unknown batch status: " ^ status))
+  | `String "running" -> Running
+  | `String "paused" -> Paused
+  | `String "finished" -> Finished
+  | `String "failed" -> Failed ""
+  | `String "killed" -> Killed ""
   | _ -> invalid_arg "expected JSON object"
 
 let batch_to_yojson batch =
@@ -248,17 +258,17 @@ let batch_of_yojson = function
         id = json_string (json_member "id" fields);
         request = Protocol.submit_of_yojson (json_member "request" fields);
         out_dir = json_string (json_member "out_dir" fields);
-        htbl = results_of_yojson (json_member "results" fields);
+        htbl = optional_json "results" fields results_of_yojson (Common.HStrings.create 0);
         log = Stream.create max_int;
         log_done = ref (not running);
         log_drained = Eio.Condition.create ();
         log_closed = not running;
         watchers = ref [];
         running_switches = ref [];
-        total_jobs = json_int (json_member "total_jobs" fields);
-        prior_jobs = json_int (json_member "prior_jobs" fields);
-        prior_completed = json_int (json_member "prior_completed" fields);
-        completed = json_int (json_member "completed" fields);
+        total_jobs = optional_json "total_jobs" fields json_int 0;
+        prior_jobs = optional_json "prior_jobs" fields json_int 0;
+        prior_completed = optional_json "prior_completed" fields json_int 0;
+        completed = optional_json "completed" fields json_int 0;
         status;
       }
   | _ -> invalid_arg "expected JSON object"

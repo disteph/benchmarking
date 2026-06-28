@@ -45,6 +45,26 @@ let test_submit_roundtrip () =
   | Unpause _ -> fail "decoded submit as unpause"
   | State -> fail "decoded submit as state"
 
+let test_legacy_submit_defaults () =
+  let json =
+    `Assoc
+      [
+        ("benchmark_file", `String "lists/benchmarks.txt");
+        ("benchmark_prefix", `String "/old/benchmarks");
+        ("cwd", `String "/old/solvers");
+        ("lines", `List [ `String "a.smt2" ]);
+        ("commands", `List [ `String "solver" ]);
+      ]
+  in
+  let r = Protocol.submit_of_yojson json in
+  assert_equal "legacy benchmark root" "/old/benchmarks" r.server_benchmark_root;
+  assert_equal "legacy exe root" "/old/solvers" r.server_exe_root;
+  assert_equal "legacy benchmark name" "benchmarks" r.benchmark_name;
+  assert_int "legacy timeout default" 300 r.timeout;
+  assert_int "legacy generations default" 1 r.generations;
+  assert_bool "legacy excel default" (not r.excel);
+  assert_bool "legacy detach default" (not r.detach)
+
 let test_reconnect_roundtrip () =
   match
     Protocol.encode_request (Reconnect { batch_id = "batch-000123"; download = true })
@@ -241,6 +261,7 @@ let test_result_file_names () =
 
 let () =
   test_submit_roundtrip ();
+  test_legacy_submit_defaults ();
   test_reconnect_roundtrip ();
   test_legacy_reconnect_defaults_no_download ();
   test_aggregate_roundtrip ();
