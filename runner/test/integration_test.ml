@@ -305,7 +305,7 @@ let test_state_rejects_submission ~client ~client_cwd ~port list_path solver =
     (contains ~needle:"-state is mutually exclusive" result.output)
 
 let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_root list_path
-    solver =
+    ~server_root solver =
   let result =
     run_client ~client ~client_cwd ~port
       (with_server_roots ~bench_root ~exe_root
@@ -316,6 +316,21 @@ let test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root ~exe_r
   let dir = download_dir_of_output result.output in
   assert_files_exact dir [ "log"; "results.xlsx"; "sat_solver.sh.csv" ];
   assert_csv_contains_sat dir "sat_solver.sh";
+  let benchmark_lines =
+    read_file list_path |> String.split_on_char '\n' |> List.filter (fun line -> line <> "")
+  in
+  let digest =
+    Runner_lib.Common.digest ~benchmark_file:(Runner_lib.Common.prune list_path)
+      ~lines:benchmark_lines ~timeout:5 ()
+  in
+  let aggregate_xlsx =
+    Filename.concat (Unix.realpath server_root) (digest ^ ".xlsx")
+  in
+  assert_bool "normal submit should produce server aggregate spreadsheet"
+    (Sys.file_exists aggregate_xlsx);
+  let aggregate_sheet = read_zip_entry aggregate_xlsx "xl/worksheets/sheet4.xml" in
+  assert_bool "server aggregate spreadsheet should include batch CSV rows"
+    (contains ~needle:"sat-case-1.smt2" aggregate_sheet);
   (batch_id_of_output result.output, dir)
 
 let test_finished_batch_reconnect_modes ~client ~client_cwd ~port batch_id =
@@ -905,7 +920,7 @@ let () =
       test_state_rejects_submission ~client ~client_cwd ~port list_path "sat_solver.sh";
       let first_batch_id, first_dir =
         test_normal_submit_and_transfer ~client ~client_cwd ~port ~bench_root
-          ~exe_root:solver_dir list_path "sat_solver.sh"
+          ~exe_root:solver_dir ~server_root list_path "sat_solver.sh"
       in
       ignore (test_finished_batch_reconnect_modes ~client ~client_cwd ~port first_batch_id);
       let reconnect_dir =

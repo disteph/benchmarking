@@ -527,6 +527,63 @@ let compact_terminal_batch batch =
 let terminal_batch_is_compact batch =
   batch.request.lines = [] && Common.HStrings.to_list batch.htbl = []
 
+let starts_with ~prefix s =
+  let prefix_len = String.length prefix in
+  String.length s >= prefix_len && String.equal (String.sub s 0 prefix_len) prefix
+
+let all_digits s =
+  String.length s > 0 && String.for_all (fun c -> c >= '0' && c <= '9') s
+
+let is_run_family_dir ~digest name =
+  if String.equal name digest then true
+  else
+    let run_prefix = digest ^ "-run" in
+    let prefix_len = String.length run_prefix in
+    starts_with ~prefix:run_prefix name
+    && all_digits
+         (String.sub name prefix_len (String.length name - prefix_len))
+
+let csv_files_in_dir dir =
+  Sys.readdir dir |> Array.to_list |> List.sort String.compare
+  |> List.filter_map (fun name ->
+         match Common.strip_suffix ~suffix:".csv" name with
+         | Some _ -> Some (Filename.concat dir name)
+         | None -> None)
+
+let aggregate_finished_benchmark_set state batch =
+  let request = batch.request in
+  let digest =
+    Common.digest ~benchmark_file:request.benchmark_name ~lines:request.lines
+      ~timeout:request.timeout ?memory:request.memory ()
+  in
+  try
+    let output_root = Unix.realpath state.output_root in
+    let matching_dirs =
+      Sys.readdir output_root |> Array.to_list |> List.sort String.compare
+      |> List.filter_map (fun name ->
+             let path = Filename.concat output_root name in
+             if is_run_family_dir ~digest name && Sys.file_exists path && Sys.is_directory path
+             then
+               Some path
+             else None)
+    in
+    let csv_paths = List.concat_map csv_files_in_dir matching_dirs in
+    if csv_paths = [] then
+      state.log_server
+        (Format.sprintf "no CSV files found for automatic aggregate %s" digest)
+    else
+      let htbl, total_rows =
+        Common.load_csv_files_native ~source:("automatic aggregate " ^ digest) csv_paths
+      in
+      let xlsx_path = Filename.concat output_root (digest ^ ".xlsx") in
+      Common.hashtables_to_excel_file_native ~overwrite:true xlsx_path htbl Common.cmp_user;
+      state.log_server
+        (Format.sprintf "automatically aggregated %i CSV files and %i CSV rows into %s"
+           (List.length csv_paths) total_rows xlsx_path)
+  with exn ->
+    state.log_server
+      (Format.sprintf "automatic aggregate for %s failed: %s" digest (Printexc.to_string exn))
+
 let finish_batch state batch =
   match batch.status with
   | Failed _ | Finished | Killed _ -> ()
@@ -537,6 +594,7 @@ let finish_batch state batch =
       if batch.request.excel then
         Common.hashtables_to_excel_native ~timeout:batch.request.timeout ~overwrite:true
           batch.out_dir batch.htbl Common.cmp_user;
+      aggregate_finished_benchmark_set state batch;
       batch.log_done := true;
       Stream.add batch.log "";
       while not batch.log_closed do
@@ -677,10 +735,6 @@ let rec path_is_under ~root path =
   ||
   let parent = Filename.dirname path in
   not (String.equal parent path) && path_is_under ~root parent
-
-let starts_with ~prefix s =
-  let prefix_len = String.length prefix in
-  String.length s >= prefix_len && String.equal (String.sub s 0 prefix_len) prefix
 
 let resolve_reconnect_folder state folder =
   if Filename.is_relative folder then
@@ -824,13 +878,6 @@ let batch_of_reconnect_folder state folder =
               (Format.sprintf "imported %s as %s with %i CSV rows" folder batch.id total_jobs);
             Ok batch
           with exn -> Error (Printexc.to_string exn)))
-
-let csv_files_in_dir dir =
-  Sys.readdir dir |> Array.to_list |> List.sort String.compare
-  |> List.filter_map (fun name ->
-         match Common.strip_suffix ~suffix:".csv" name with
-         | Some _ -> Some (Filename.concat dir name)
-         | None -> None)
 
 let aggregate_matching_csvs state prefix =
   match resolve_aggregate_prefix state prefix with

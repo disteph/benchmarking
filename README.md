@@ -451,6 +451,13 @@ For a batch with `S` solver commands, the server writes:
 - one `<solver>.csv` per solver
 - `results.xlsx` if `-excel` or `-xml` was used
 
+After a batch finishes, the server also regenerates an aggregate workbook named
+`<digest>.xlsx` directly under `-output-root`, where `<digest>` is the same
+benchmark-set-and-limits digest used for the batch output directory. It combines
+all CSV files from every `<digest>` and `<digest>-runN` directory under that
+output root, so repeated runs on the same benchmark set with the same timeout
+and memory limit are folded into one workbook.
+
 So a normal server-produced batch produces:
 
 - `S + 1` files without Excel
