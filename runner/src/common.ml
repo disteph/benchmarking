@@ -17,10 +17,15 @@ type aggregate = [ output | `Inconsistent ]
 module HStrings = CCHashtbl.Make (String)
 
 let massage_out stdout =
-  let (!=) a b = not (Int.equal a b) in
-  if String.rfind ~sub:"unsat" stdout != -1 then `Unsat
-  else if String.rfind ~sub:"sat" stdout != -1 then `Sat
-  else `Crash (`UnreadableOut, stdout)
+  let rec loop = function
+    | [] -> `Crash (`UnreadableOut, stdout)
+    | line :: lines -> (
+        match String.trim line with
+        | "unsat" -> `Unsat
+        | "sat" -> `Sat
+        | _ -> loop lines)
+  in
+  loop (String.lines stdout)
 
 let massage_err stderr =
   let rec last_three = function

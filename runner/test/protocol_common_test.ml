@@ -259,6 +259,23 @@ let test_result_file_names () =
   if names <> [ "log"; "solver-a.csv"; "solver-b.csv"; "results.xlsx" ] then
     fail "unexpected result file names"
 
+let test_massage_out_requires_answer_line () =
+  begin
+    match Common.massage_out "sat\n" with
+    | `Sat -> ()
+    | _ -> fail "sat line was not classified as sat"
+  end;
+  begin
+    match Common.massage_out "unsat\n" with
+    | `Unsat -> ()
+    | _ -> fail "unsat line was not classified as unsat"
+  end;
+  begin
+    match Common.massage_out "(error \"mcsat: unsupported theory\")\n" with
+    | `Crash (`UnreadableOut, _) -> ()
+    | _ -> fail "mcsat error was misclassified as an answer"
+  end
+
 let () =
   test_submit_roundtrip ();
   test_legacy_submit_defaults ();
@@ -276,4 +293,5 @@ let () =
   test_safe_output_file_names ();
   test_solver_output_name ();
   test_result_file_names ();
+  test_massage_out_requires_answer_line ();
   print_endline "protocol/common tests passed"
